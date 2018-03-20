@@ -44,6 +44,7 @@ import random
 import string
 import re
 import shutil
+import webbrowser
 from math import log, ceil
 from io import StringIO, TextIOWrapper
 from subprocess import Popen, CalledProcessError, check_output, PIPE
@@ -51,25 +52,10 @@ from collections import OrderedDict
 from copy import deepcopy
 
 # Third party
-# import Bio.Phylo
+import Bio.Phylo
 # from Bio.Phylo import PhyloXML, NeXML, Newick
 # sys.path.insert(0, "./")  # For stand alone executable, where dependencies are packaged with BuddySuite
 from Bio.Alphabet import IUPAC
-
-try:
-    import ete3
-    from ete3.coretype.tree import TreeError
-except ImportError:
-    print("""\
-ETE3 toolkit not detected on your system. Try running the following:
-
-    pip install --upgrade  https://github.com/jhcepas/ete/archive/3.0.zip
-    pip install six
-
-Or see http://etetoolkit.org/download/ for installation details.
-""")
-    sys.exit()
-
 try:
     import dendropy
 except ImportError:
@@ -116,22 +102,16 @@ if dendropy_ver < 411:
 
 # ##################################################### WISH LIST #################################################### #
 """
-def delete_metadata(_trees):
+def modify_metadata(_trees):
+    # Probably just loop through dendropy nodes and modify node.annotations["<attr>"] 
     return _trees
-
 
 def decode_accessions(phylobuddy):
     # If taxa lables are accessions, reach out to the respective database and resolve them into actual names
     return phylobuddy
 
-
-def descending_order(phylobuddy):
-    return phylobuddy
-
-
-def ascending_order(phylobuddy):
-    return phylobuddy
 """
+
 
 # - Compare two trees, and add colour to the nodes that differ. [ ]
 # - Implement sum_bootstrap(), but generalize to any value.
@@ -142,12 +122,10 @@ def ascending_order(phylobuddy):
 # - Prune clade (ie, prune away all tips from the common ancestor of two or more tips)
 # See http://cegg.unige.ch/system/files/nwutils_tutorial.pdf for ideas
 # - Re-implement many or all of Phyultility commands: https://code.google.com/p/phyutility/
-# - Try hard to remove any dependency on PyQt4 (preferably remove ETE3 completely if possible). ete3.NodeStyle() cannot
-# be imported without PyQt4
 
 # ##################################################### GLOBALS ###################################################### #
 CONFIG = br.config_values()
-VERSION = br.Version("PhyloBuddy", 1, "2.7", br.contributors, {"year": 2017, "month": 6, "day": 16})
+VERSION = br.Version("PhyloBuddy", 1, "4b", br.contributor_list, {"year": 2017, "month": 12, "day": 20})
 OUTPUT_FORMATS = ["newick", "nexus", "nexml"]
 PHYLO_INFERENCE_TOOLS = ["raxml", "phyml", "fasttree"]
 
@@ -232,12 +210,12 @@ class PhyloBuddy(object):
             self.trees = _input
 
         elif str(type(_input)) == "<class '_io.TextIOWrapper'>" or isinstance(_input, StringIO):
-            with open("%s/tree.tmp" % tmp_dir.path, "w", encoding="utf-8") as _ofile:
+            with open(os.path.join(tmp_dir.path, "tree.tmp"), "w", encoding="utf-8") as _ofile:
                 in_from_handle = clean_newick(in_from_handle)
                 _ofile.write(in_from_handle)
 
             # Removes figtree data so parser doesn't die
-            figtree = _extract_figtree_metadata("%s/tree.tmp" % tmp_dir.path)
+            figtree = _extract_figtree_metadata(os.path.join(tmp_dir.path, "tree.tmp"))
             if figtree:
                 in_from_handle = figtree[0]
 #                with open("%s/tree.tmp" % tmp_dir.path, "w", encoding="utf-8") as _ofile:
@@ -245,7 +223,8 @@ class PhyloBuddy(object):
 
             _trees = dendropy.TreeList()
             if self.in_format != 'nexml':
-                _trees.read(data=in_from_handle, schema=self.in_format, extract_comment_metadata=True)
+                _trees.read(data=in_from_handle, schema=self.in_format, extract_comment_metadata=True,
+                            preserve_underscores=True)
             else:
                 _trees.read(data=in_from_handle, schema=self.in_format)
 
@@ -293,46 +272,16 @@ class PhyloBuddy(object):
 
         return _output
 
-    def write(self, _file_path):
+    def write(self, _file_path, out_format=None):
+        orig_out_format = str(self.out_format)
+        self.out_format = self.out_format if out_format is None else out_format
         with open(_file_path, "w", encoding="utf-8") as _ofile:
             _ofile.write(str(self))
+        self.out_format = orig_out_format
         return
 
 
 # ################################################# HELPER FUNCTIONS ################################################# #
-def _convert_to_ete(_tree, ignore_color=False):
-    """
-    Converts dendropy trees to ete trees
-    :param _tree: A dendropy Tree object
-    :param ignore_color: Specifies if figtree color metadata should be turned into ETE NodeStyle objects
-    :return: An ETE Tree object
-    """
-    tmp_dir = br.TempDir()
-    with open("%s/tree.tmp" % tmp_dir.path, "w", encoding="utf-8") as _ofile:
-        _ofile.write(re.sub('!color', 'pb_color', _tree.as_string(schema='newick', annotations_as_nhx=True,
-                                                                  suppress_annotations=False, suppress_rooting=True)))
-
-    ete_tree = ete3.TreeNode(newick="%s/tree.tmp" % tmp_dir.path)
-
-    if not ignore_color:  # Converts color annotations from figtree into NodeStyle objects.
-        for node in ete_tree.traverse():
-            if hasattr(node, 'pb_color'):
-                try:
-                    style = ete3.NodeStyle()
-                except AttributeError as e:
-                    if "has no attribute 'NodeStyle'" in str(e):
-                        raise AttributeError("Unable to import NodeStyle... You probably need to install pyqt.")
-                    raise e
-                style['fgcolor'] = node.pb_color
-                style['hz_line_color'] = node.pb_color
-                node.set_style(style)
-    else:
-        for node in ete_tree.traverse():
-            node.del_feature('pb_color')
-
-    return ete_tree
-
-
 def _extract_figtree_metadata(_file_path):
     """
     Removes the figtree block from nexus files
@@ -428,6 +377,71 @@ def num_taxa(phylobuddy, nodes=False, split=False):
 
 
 # ################################################ MAIN API FUNCTIONS ################################################ #
+def add_branch(phylobuddy, new_branch, sister_taxa):
+    """
+    Add a subtree to an existing tree
+    :param phylobuddy: PhyloBuddy object of existing tree
+    :param new_branch: Single taxon or PhyloBuddy object of subtree
+    :param sister_taxa: Single taxon or list of taxa that the new branch should be placed sister to (regex patterns)
+    :return:
+    """
+    if type(new_branch) == str:
+        new_branch = PhyloBuddy("(%s);" % new_branch)
+    elif type(new_branch) == Tree:
+        new_branch = PhyloBuddy([new_branch])
+    elif type(new_branch) != PhyloBuddy:
+        raise TypeError("new_branch parameter must be a string, dentropy tree, or PhyloBuddy object.")
+
+    for node in new_branch.trees[0]:
+        if node.parent_node is None:
+            new_branch = node
+            if new_branch.num_child_nodes() == 1:
+                new_branch = new_branch.child_nodes()[0]
+            break
+
+    sister_taxa = [sister_taxa] if type(sister_taxa) == str else sister_taxa
+
+    for tree in phylobuddy.trees:
+        all_nodes = []
+        for regex in sister_taxa:
+            for indx, id_list in list_ids(PhyloBuddy([tree])).items():
+                for next_id in id_list:
+                    if re.search(regex, next_id):
+                        all_nodes.append(next_id)
+        if len(all_nodes) == 0:
+            raise AttributeError("Unable to identify any sister taxa in tree.")
+
+        elif len(all_nodes) == 1:
+            leaf_node = tree.find_node_with_taxon_label(all_nodes[0])
+            mrca = leaf_node.parent_node
+            new_edge_len = leaf_node.edge.length / 2
+            attachment = Node(edge_length=new_edge_len)
+            leaf_node.edge.length = new_edge_len
+            new_branch.edge.length = new_edge_len
+            mrca.remove_child(leaf_node)
+            mrca.add_child(attachment)
+            attachment.add_child(new_branch)
+            attachment.add_child(leaf_node)
+
+        else:
+            mrca = tree.mrca(taxon_labels=all_nodes)
+            new_edge_len = mrca.edge.length / 2
+            attachment = Node(edge_length=new_edge_len)
+            mrca.edge.length = new_edge_len
+            new_branch.edge.length = new_edge_len
+
+            mrca_parent = mrca.parent_node
+            if mrca_parent is not None:
+                mrca_parent.remove_child(mrca)
+                mrca_parent.add_child(attachment)
+                attachment.add_child(mrca)
+            else:
+                mrca.add_child(attachment)
+
+            attachment.add_child(new_branch)
+    return phylobuddy
+
+
 def collapse_polytomies(phylobuddy, threshold, mode="support"):
     """
     Remove nodes if their support value or branch length are below the given threshold
@@ -470,18 +484,106 @@ def consensus_tree(phylobuddy, frequency=.5):
     return phylobuddy
 
 
-def display_trees(phylobuddy):
+def display_trees(phylobuddy, program=None):
     """
-    Displays trees in an ETE GUI window, one-by-one.
+    Displays trees in a web browser window, one-by-one.
     :param phylobuddy: PhyloBuddy object
+    :param program: How should the tree be displayed --> ['figtree', 'system']
     :return: None
     """
-    if "DISPLAY" not in os.environ:
+    available_programs = ['figtree', 'system']
+    if program and program not in available_programs:
+        raise AttributeError("Unknown program '%s' selected for display. "
+                             "Please select between %s" % (program, available_programs))
+
+    if os.name != "nt" and sys.platform != "darwin" and "DISPLAY" not in os.environ:
+        # We just assume that a Windows/Mac machine is graphical
         raise SystemError("This system does not appear to be graphical, "
                           "so display_trees() will not work. Try using trees_to_ascii()")
 
-    for _tree in phylobuddy.trees:
-        _convert_to_ete(_tree).show()
+    program = "system" if program is None else program
+
+    if program == "figtree":
+        if not shutil.which("figtree"):
+            raise SystemError("Unable to find FigTree on your system. Please install it and ensure it is present in"
+                              " your $PATH. http://tree.bio.ed.ac.uk/software/figtree/")
+
+    tmp_dir = br.TempDir()
+    tree_file = tmp_dir.subfile('tree.svg')
+
+    if program == "figtree":
+        if os.name == "nt":
+            print("Sorry! I'm not sure how to launch FigTree on Windows. Given that you've seen this message, you"
+                  " probably want the functionality, so leave a message in the GitHub issue tracker.")
+            return False
+
+        phylobuddy.write(tree_file, out_format="nexus")
+        tty = open("/dev/tty", mode="r")
+        os.dup2(tty.fileno(), 0)
+
+        Popen("figtree %s" % tree_file, shell=True, stdout=PIPE, stderr=PIPE)
+        sys.stdin = input("Switching to FigTree, hit Enter to exit PhyloBuddy.\n")
+        tty.close()
+
+    elif program == "system":
+        try:
+            br.dummy_func()  # For monkey patching purposes in unit tests
+            import pylab
+        except RuntimeError as err:
+            if "The Mac OS X backend will not be able to function correctly" in str(err):
+                message = """\
+It looks like you are on a Mac with an incorrect backend
+for matplotlib. This can probably be fixed by amending your 
+matplotlibrc file. Would you like PhyloBuddy try to do this 
+automatically? y/[n]: """
+                if br.ask(message, default="no"):
+                    home = os.path.expanduser('~')
+                    mplibrc = os.path.join(home, ".matplotlib", "matplotlibrc")
+                    os.makedirs(os.path.join(home, ".matplotlib"), exist_ok=True)
+                    if os.path.isfile(mplibrc):
+                        with open(mplibrc, "r") as ifile:
+                            matplotlibrc = ifile.read().strip()
+                    else:
+                        matplotlibrc = ""
+
+                    with open(mplibrc, "w") as ofile:
+                        ofile.write("# Backend set by PhyloBuddy\nbackend: TkAgg\n%s" % matplotlibrc)
+
+                    br._stderr("\n%s amended.\nPlease re-run your command.\n" % mplibrc)
+                else:
+                    br._stderr("\nOriginal error message:\n\n" + str(err) + "\n\nStack Overflow may help you out:\n"
+                               "https://stackoverflow.com/questions/21784641/installation-issue-with-"
+                               "matplotlib-python\n\n")
+                sys.exit()
+
+            else:
+                raise err
+
+        label_colors = []
+        indx = 0
+        for tree in phylobuddy.trees:
+            label_colors.append(OrderedDict())
+            for node in tree:
+                if node.taxon and node.annotations.get_value('!color'):
+                    label_colors[indx][node.taxon.label] = node.annotations.get_value('!color')
+            indx += 1
+
+        indx = 0
+        tty = open("/dev/tty", mode="r")
+        os.dup2(tty.fileno(), 0)
+
+        for tree in Bio.Phylo.parse(StringIO(str(phylobuddy)), phylobuddy.out_format):
+            Bio.Phylo.draw(tree, label_func=lambda leaf: leaf.name, do_show=False, label_colors=label_colors[indx])
+            pylab.axis('off')
+            pylab.savefig(tree_file, format='svg', bbox_inches='tight', dpi=300)
+            if os.name == "nt":  # File path specification different between operating systems
+                file_location = tree_file
+            else:
+                file_location = "file:///" + tree_file
+            webbrowser.open(file_location, new=2)
+            input("Switching to system browser. Hit Enter to continue.\n")
+            indx += 1
+        tty.close()
     return True
 
 
@@ -529,16 +631,17 @@ def distance(phylobuddy, method='weighted_robinson_foulds'):
     return output
 
 
-def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
+def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False, r_seed=None):
     # ToDo: Break the function up for each program being wrapped. There's WAY too much going on here...
     # ToDo: Multiple alignments are not un-hashing correctly (at least in raxml)
     """
     Calls tree building tools to generate trees
     :param alignbuddy: The AlignBuddy object containing the alignments for building the trees
-    :param alias: The tree building tool to be used (raxml/phyml/fasttree)
+    :param alias: The tree building tool to be used (raxml/phyml/fasttree/iqtree)
     :param params: Additional parameters to be passed to the tree building tool
     :param keep_temp: Determines if/where the temporary files will be kept
     :param quiet: Suppress all output form alignment programs
+    :param r_seed: Set random seed used for name hashing
     :return: A PhyloBuddy object containing the trees produced.
     """
 
@@ -561,10 +664,13 @@ def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
         tool = "phyml"
     elif "fasttree" in alias.lower():
         tool = "fasttree"
+    elif "iqtree" in alias.lower():
+        tool = "iqtree"
     else:
         for prog in [('raxml', " -v", "This is RAxML version"),
                      ('phyml', " --version", "This is PhyML version"),
-                     ('fasttree', "", "Usage for FastTree version")]:
+                     ('fasttree', "", "Usage for FastTree version"),
+                     ('iqtree', " -h", "IQ-TREE")]:
             version = Popen("%s%s" % (alias, prog[1]), shell=True, stderr=PIPE, stdout=PIPE).communicate()
             if prog[2] in version[0].decode() or prog[2] in version[1].decode():
                 tool = prog[0]
@@ -580,7 +686,8 @@ def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
 
     else:
         tmp_dir = br.TempDir()
-        tmp_in = "{0}/pb_input.aln".format(tmp_dir.path)
+        tmp_in = tmp_dir.subfile("pb_input.aln")
+        cwd = os.getcwd()
 
         def remove_invalid_params(_dict):  # Helper method for blacklisting flags
             parameters = params
@@ -595,12 +702,14 @@ def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
             return parameters
 
         params = re.split(' ', params, )  # Expands paths in _params to absolute paths
+        file_list = []
         for indx, token in enumerate(params):
             if os.path.exists(token):
                 params[indx] = os.path.abspath(token)
+                if os.path.isfile(token):
+                    file_list.append(params[indx])
+
         params = ' '.join(params)
-        r_seed = re.search("r_seed ([0-9]+)", params)
-        r_seed = None if not r_seed else int(r_seed.group(1))
 
         phylo_objs = []
         for alignment in alignbuddy.alignments:  # Need to loop through one tree at a time
@@ -610,7 +719,19 @@ def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
             sub_alignbuddy = Alb.clean_seq(sub_alignbuddy)
             sub_alignbuddy.set_format('phylipss') if tool == "phyml" else sub_alignbuddy.set_format('phylipi')
 
-            sub_alignbuddy.write("{0}/pb_input.aln".format(tmp_dir.path))  # Most tree builders require an input file
+            sub_alignbuddy.write(os.path.join(tmp_dir.path, "pb_input.aln"))  # Most tree builders require an input file
+
+            for next_file in file_list:
+                with open(next_file, "r", encoding="utf-8", errors='ignore') as ifile:
+                    contents = ifile.read()
+                for _hash, _id in sub_alignbuddy.hash_map.items():
+                    contents = re.sub(r'%s([,)\'\":])' % _id, r'%s\1' % _hash, contents)
+                    contents = re.sub(r'[\'\"]%s[\'\"]' % _hash, r'%s' % _hash, contents)
+                file_name = os.path.split(next_file)[1]
+                file_name = tmp_dir.subfile(file_name)
+                with open(file_name, "w", encoding="utf-8") as ofile:
+                    ofile.write(contents)
+                params = re.sub(next_file, file_name, params)
 
             if tool == 'raxml':
                 params = remove_invalid_params({'-s': True, '-n': True, '-w': True})
@@ -626,7 +747,7 @@ def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
                         params += " -m PROTCATLG"
 
                 if '-p' not in params:  # RNG seed
-                    params += ' -p 12345'
+                    params += ' -p 12345' if not r_seed else ' -p %s' % r_seed
                 if '-#' not in params and '-N' not in params:  # Number of trees to build
                     params += ' -# 1'
                 command = '{0} -s {1} {2} -n result -w {3}'.format(alias, tmp_in, params, tmp_dir.path)
@@ -653,20 +774,33 @@ def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
                 else:
                     command = '{0} {1} {2}'.format(alias, params, tmp_in)
 
+            elif tool == "iqtree":
+                params = remove_invalid_params({"-s": True, "-st": True})
+                if sub_alignbuddy.alpha in [IUPAC.ambiguous_dna, IUPAC.unambiguous_dna,
+                                            IUPAC.ambiguous_rna, IUPAC.unambiguous_rna]:
+                    params += ' -st DNA'
+                else:
+                    params += ' -st AA'
+
+                if "-nt" not in params:
+                    params += ' -nt AUTO'
+
+                command = '{0} -s {1} {2}'.format(alias, tmp_in, params)
+                os.chdir(tmp_dir.path)
             output = ''
 
             try:
-                if tool in ['raxml', 'phyml']:  # If tool writes to file
+                if tool in ['raxml', 'phyml', 'iqtree']:  # If tool writes to file
                     if quiet:
                         Popen(command, shell=True, universal_newlines=True, stdout=PIPE, stderr=PIPE).communicate()
                     else:
-                        Popen(command, shell=True, universal_newlines=True, stdout=sys.stderr).wait()
+                        Popen(command, shell=True, universal_newlines=True, stdout=sys.__stderr__).wait()
                     file_found = False
-                    for path in ["%s/%s" % (tmp_dir.path, x) for x in ['RAxML_bestTree.result',
-                                                                       'RAxML_bootstrap.result',
-                                                                       'RAxML_bipartitions.result',
-                                                                       'pb_input.aln_phyml_tree',
-                                                                       'pb_input.aln_phyml_tree.txt']]:
+                    outfiles = {'raxml': ['RAxML_bestTree.result', 'RAxML_bootstrap.result',
+                                          'RAxML_bipartitions.result', 'RAxML_fastTreeSH_Support.result'],
+                                'phyml': ['pb_input.aln_phyml_tree', 'pb_input.aln_phyml_tree.txt'],
+                                'iqtree': ['pb_input.aln.treefile']}
+                    for path in [os.path.join(tmp_dir.path, x) for x in outfiles[tool]]:
                         if os.path.isfile(path):
                             file_found = True
                             break
@@ -683,26 +817,36 @@ def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
             if tool == 'raxml':  # Pull tree from written file
                 num_runs = re.search('-[#N] ([0-9]+)', params)
                 num_runs = 0 if not num_runs else int(num_runs.group(1))
-                if re.search('-b ([0-9]+)', params):
-                    with open('{0}/RAxML_bootstrap.result'.format(tmp_dir.path), "r", encoding="utf-8") as result:
+                if re.search('-b [0-9]+', params) or re.search('-x [0-9]+', params):
+                    with open(os.path.join(tmp_dir.path, "RAxML_bootstrap.result"), "r", encoding="utf-8") as result:
                         output += result.read()
-                elif os.path.isfile('{0}/RAxML_bipartitions.result'.format(tmp_dir.path)):
-                    with open('{0}/RAxML_bipartitions.result'.format(tmp_dir.path), "r", encoding="utf-8") as result:
+                elif os.path.isfile(os.path.join(tmp_dir.path, "RAxML_bipartitions.result")):
+                    with open(os.path.join(tmp_dir.path, "RAxML_bipartitions.result"), "r", encoding="utf-8") as result:
                         output += result.read()
-                elif os.path.isfile('{0}/RAxML_bestTree.result'.format(tmp_dir.path)):
-                    with open('{0}/RAxML_bestTree.result'.format(tmp_dir.path), "r", encoding="utf-8") as result:
+                elif os.path.isfile(os.path.join(tmp_dir.path, "RAxML_bestTree.result")):
+                    with open(os.path.join(tmp_dir.path, "RAxML_bestTree.result"), "r", encoding="utf-8") as result:
+                        output += result.read()
+                elif os.path.isfile(os.path.join(tmp_dir.path, "RAxML_fastTreeSH_Support.result")):
+                    with open(os.path.join(tmp_dir.path, "RAxML_fastTreeSH_Support.result"), "r", encoding="utf-8") \
+                            as result:
                         output += result.read()
                 elif num_runs > 1:
                     for tree_indx in range(num_runs):
-                        with open('{0}/RAxML_result.result.RUN.{1}'.format(tmp_dir.path, tree_indx),
+                        with open(os.path.join(tmp_dir.path, "RAxML_result.result.RUN.{}".format(tree_indx)),
                                   "r", encoding="utf-8") as result:
                             output += result.read()
 
             elif tool == 'phyml':
-                phyml_out = '{0}/pb_input.aln_phyml_tree'.format(tmp_dir.path)
+                phyml_out = os.path.join(tmp_dir.path, "pb_input.aln_phyml_tree")
                 phyml_out += '.txt' if not os.path.isfile(phyml_out) else ''
                 with open(phyml_out, "r", encoding="utf-8") as result:
                     output += result.read()
+            elif tool == 'iqtree':
+                with open(os.path.join(tmp_dir.path, 'pb_input.aln.treefile'), "r") as result:
+                    output += result.read()
+
+            os.chdir(cwd)
+
             if keep_temp:  # Store temp files
                 shutil.copytree(tmp_dir.path, keep_temp)
 
@@ -714,11 +858,11 @@ def generate_tree(alignbuddy, alias, params=None, keep_temp=None, quiet=False):
             if keep_temp:
                 _root, dirs, files = next(br.walklevel(keep_temp))
                 for file in files:
-                    with open("%s/%s" % (_root, file), "r", encoding="utf-8") as ifile:
+                    with open(os.path.join(_root, file), "r", encoding="utf-8", errors='ignore') as ifile:
                         contents = ifile.read()
                     for _hash, _id in sub_alignbuddy.hash_map.items():
                         contents = re.sub(_hash, _id, contents)
-                    with open("%s/%s" % (_root, file), "w", encoding="utf-8") as ofile:
+                    with open(os.path.join(_root, file), "w", encoding="utf-8") as ofile:
                         ofile.write(contents)
             phylo_objs += phylobuddy.trees
 
@@ -788,6 +932,12 @@ def hash_ids(phylobuddy, hash_length=10, nodes=False, r_seed=None):
                 node.taxon.label = hashes.new_hash(str(node.taxon.label))
 
     phylobuddy.hash_map = hashes.hash_map
+    return phylobuddy
+
+
+def ladderize(phylobuddy, ascending=True):
+    for tree in phylobuddy.trees:
+        tree.ladderize(ascending)
     return phylobuddy
 
 
@@ -889,164 +1039,67 @@ def root(phylobuddy, *root_nodes):
 
     return phylobuddy
 
-"""
-def show_diff(phylobuddy):  # Doesn't work.
-    sys.exit('show_diff() is not implemented yet.')
-    # if len(_phylobuddy.trees) != 2:
-    #    raise AssertionError("PhyloBuddy object should have exactly 2 trees.")
-    trees = [_convert_to_ete(phylobuddy.trees[0], ignore_color=True),
-             _convert_to_ete(phylobuddy.trees[1], ignore_color=True)]
-
-    paths = []
-
-    def get_all_paths(_tree, _path_list=list()):
-        new_list = deepcopy(_path_list)
-        new_list.append(_tree)
-        print(_tree)
-        if not _tree.is_leaf():
-            children = _tree.child_nodes()
-            for child in children:
-                new_list.append(get_all_paths(child, _path_list=new_list))
-        else:
-            paths.append(new_list)
-
-    get_all_paths(phylobuddy.trees[0].seed_node)
-    print(paths)
-
-    data = trees[0].robinson_foulds(trees[1])
-    tree1_only = data[3] - data[4]
-    tree2_only = data[4] - data[3]
-
-    tree1_only_set = set()
-    for tup in tree1_only:
-        for _name in tup:
-            tree1_only_set.add(_name)
-
-    tree2_only_set = set()
-    for tup in tree2_only:
-        for _name in tup:
-            tree2_only_set.add(_name)
-
-    for node in trees[0]:
-        if node.name in tree1_only_set:
-            node.add_feature('pb_color', '#ff0000')
-        else:
-            node.add_feature('pb_color', '#00ff00')
-
-    for node in trees[1]:
-        if node.name in tree2_only_set:
-            node.add_feature('pb_color', '#ff0000')
-        else:
-            node.add_feature('pb_color', '#00ff00')
-
-    tmp_dir = br.TempDir()
-    with open("%s/tree1.tmp" % tmp_dir.path, "w", encoding="utf-8") as ofile:
-        ofile.write(re.sub('pb_color', '!color', trees[0].write(features=[])))
-    with open("%s/tree2.tmp" % tmp_dir.path, "w", encoding="utf-8") as ofile:
-        ofile.write(re.sub('pb_color', '!color', trees[1].write(features=[])))
-
-    pb1 = PhyloBuddy(_input="%s/tree1.tmp" % tmp_dir.path, _in_format=phylobuddy.in_format,
-                     _out_format=phylobuddy.out_format)
-    pb2 = PhyloBuddy(_input="%s/tree2.tmp" % tmp_dir.path, _in_format=phylobuddy.in_format,
-                     _out_format=phylobuddy.out_format)
-
-    trees = pb1.trees + pb2.trees
-
-    phylobuddy = PhyloBuddy(_input=trees, _in_format=phylobuddy.in_format, _out_format=phylobuddy.out_format)
-
-    return phylobuddy
-"""
-
 
 def show_unique(phylobuddy):
     """
-    Colors all of the nodes that aren't common between two trees
+    Colors shared leaves green and unique leaves red (between two trees)
     :param phylobuddy: PhyloBuddy object
     :return: The labeled PhyloBuddy object
     """
     if len(phylobuddy.trees) != 2:
         raise AssertionError("PhyloBuddy object should have exactly 2 trees.")
 
-    trees = [_convert_to_ete(phylobuddy.trees[0], ignore_color=True),
-             _convert_to_ete(phylobuddy.trees[1], ignore_color=True)]  # Need ETE so we can compare them
+    tree1_leaves = [node.taxon.label for node in phylobuddy.trees[0] if node.taxon]
+    tree2_leaves = [node.taxon.label for node in phylobuddy.trees[1] if node.taxon]
+    unique = []
+    for leaf in tree1_leaves:
+        if leaf not in tree2_leaves and leaf not in unique:
+            unique.append(leaf)
 
-    try:
-        data = trees[0].robinson_foulds(trees[1])
+    for leaf in tree2_leaves:
+        if leaf not in tree1_leaves and leaf not in unique:
+            unique.append(leaf)
 
-    except TreeError as e:
-        if "Unrooted tree found!" in str(e):
-            data = trees[0].robinson_foulds(trees[1], unrooted_trees=True)
-        else:
-            raise e
+    # Add color
+    for node in phylobuddy.trees[0]:
+        if node.taxon:
+            if node.taxon.label in unique:
+                node.annotations['!color'] = '#ff0000'
+            else:
+                node.annotations['!color'] = '#00ff00'
 
-    tree1_only = []
-    tree2_only = []
-
-    common_leaves = data[2]
-    for names in data[3]:
-        if len(names) == 1:
-            tree1_only.append(names[0])
-    for names in data[4]:
-        if len(names) == 1:
-            tree2_only.append(names[0])
-
-    for node in trees[0]:  # Colors the nodes
-        if node.name in common_leaves:
-            node.add_feature('pb_color', '#00ff00')
-        else:
-            node.add_feature('pb_color', '#ff0000')
-    for node in trees[1]:
-        if node.name in common_leaves:
-            node.add_feature('pb_color', '#00ff00')
-        else:
-            node.add_feature('pb_color', '#ff0000')
-
-    tmp_dir = br.TempDir()  # Convert back to dendropy
-
-    # Unnamed nodes are still given a 'name' feature, which is breaking downstream stuff
-    def delete_inner_names(input_tree):
-        output = re.sub('pb_color', '!color', input_tree)
-        output = re.sub("name=:", "", output)
-        output = re.sub("name=\]", "]", output)
-        return output
-
-    with open("%s/tree1.tmp" % tmp_dir.path, "w", encoding="utf-8") as ofile:
-        ofile.write(delete_inner_names(trees[0].write(features=[])))
-
-    with open("%s/tree2.tmp" % tmp_dir.path, "w", encoding="utf-8") as ofile:
-        ofile.write(delete_inner_names(trees[1].write(features=[])))
-
-    pb1 = PhyloBuddy(_input="%s/tree1.tmp" % tmp_dir.path, _in_format=phylobuddy.in_format,
-                     _out_format=phylobuddy.out_format)
-    pb2 = PhyloBuddy(_input="%s/tree2.tmp" % tmp_dir.path, _in_format=phylobuddy.in_format,
-                     _out_format=phylobuddy.out_format)
-
-    phylobuddy.trees = pb1.trees + pb2.trees
+    for node in phylobuddy.trees[1]:
+        if node.taxon:
+            if node.taxon.label in unique:
+                node.annotations['!color'] = '#ff0000'
+            else:
+                node.annotations['!color'] = '#00ff00'
 
     return phylobuddy
 
 
-def split_polytomies(phylobuddy):
+def split_polytomies(phylobuddy, r_seed=None):
     """
     Randomly splits polytomies. This function was drawn almost verbatim from the DendroPy Tree.resolve_polytomies()
     method. The main difference is that a very small edge_length is assigned to new nodes when a polytomy is split.
     :param phylobuddy: PhyloBuddy object
+    :param r_seed: Specify a random seed so results can be reproducible
     :return: Modified PhyloBuddy object
     """
-    rng = random.Random()
+    rand = random.Random(r_seed)
     for tree in phylobuddy.trees:
         polytomies = []
         for node in tree.postorder_node_iter():
             if len(node._child_nodes) > 2:
                 polytomies.append(node)
         for node in polytomies:
-            to_attach = rng.sample(node._child_nodes, len(node._child_nodes) - 2)
+            to_attach = rand.sample(node._child_nodes, len(node._child_nodes) - 2)
             for child in to_attach:
                 node.remove_child(child)
             attachment_points = list(node._child_nodes)
             while len(to_attach) > 0:
                 next_child = to_attach.pop()
-                next_sib = rng.choice(attachment_points)
+                next_sib = rand.choice(attachment_points)
                 next_attachment = Node(edge_length=0.000001)
                 p = next_sib._parent_node
                 p.add_child(next_attachment)
@@ -1130,6 +1183,7 @@ def argparse_init():
             phylobuddy += tree_set.trees
         phylobuddy = PhyloBuddy(phylobuddy, tree_set.in_format, tree_set.out_format)
 
+    in_args.random_seed = None if not in_args.random_seed else in_args.random_seed
     return in_args, phylobuddy
 
 
@@ -1181,6 +1235,24 @@ def command_line_ui(in_args, phylobuddy, skip_exit=False, pass_through=False):  
         _exit(_tool)
 
     # ############################################## COMMAND LINE LOGIC ############################################## #
+    # Add branch
+    if in_args.add_branch:
+        args = in_args.add_branch[0]
+        if len(args) < 2:
+            _raise_error(AttributeError("Add branch tool requires at least two arguments: new_branch and sister_taxa."),
+                         "add_branch")
+        try:
+            new_branch = PhyloBuddy(args[0])
+        except br.GuessError:
+            new_branch = args[0]
+        sister_taxa = args[1:]
+
+        try:
+            _print_trees(add_branch(phylobuddy, new_branch, sister_taxa))
+        except AttributeError as err:
+            _raise_error(err, "add_branch", "Unable to identify any sister taxa in tree")
+        _exit("add_branch")
+
     # Collapse polytomies
     if in_args.collapse_polytomies:
         args = in_args.collapse_polytomies[0]
@@ -1209,20 +1281,24 @@ def command_line_ui(in_args, phylobuddy, skip_exit=False, pass_through=False):  
 
     # Display trees
     if in_args.display_trees:
+        program = None if in_args.display_trees[0] is None else in_args.display_trees[0].lower()
+        program = "figtree" if program and "figtree".startswith(program) else program
         try:
-            display_trees(phylobuddy)
-        except SystemError:
-            if sys.platform == "darwin":
+            display_trees(phylobuddy, program)
+        except SystemError as err:
+            print(sys.platform, str(err))
+            if sys.platform == "darwin" and "graphical" in str(err):
                 br._stderr("Error: Your system does not appear to be graphical. "
                            "Try installing XQuartz (https://www.xquartz.org/), or use print_trees instead.")
-            else:
+            elif "graphical" in str(err):
                 br._stderr("Error: Your system does not appear to be graphical, so display_trees can not work. "
                            "Please use print_trees instead.")
-        except (ImportError, ModuleNotFoundError) as err:
-            if "No module named 'PyQt4'" in str(err):
-                br._stderr("Unable to display trees because PyQt4 is not installed.\n"
-                           "If conda is installed, try $: conda install pyqt=4\n")
-            _raise_error(err, "display_tree", "No module named 'PyQt4'")
+            else:
+                _raise_error(err, "display_trees", "FigTree")
+
+        except AttributeError as err:
+            _raise_error(err, "display_trees", "Unknown program")
+        
         _exit("display_trees")
 
     # Distance
@@ -1245,7 +1321,7 @@ def command_line_ui(in_args, phylobuddy, skip_exit=False, pass_through=False):  
         # ToDo: The extra arguments parameter probably doesn't need to be dependent on the tool parameter being passed
         args = in_args.generate_tree[0]
         if not args:
-            for tool in ['raxml', 'phyml', 'fasttree']:
+            for tool in ['raxml', 'phyml', 'fasttree', 'iqtree']:
                 if shutil.which(tool):
                     args = [tool]
                     break
@@ -1275,7 +1351,8 @@ def command_line_ui(in_args, phylobuddy, skip_exit=False, pass_through=False):  
 
         generated_trees = None
         try:
-            generated_trees = generate_tree(alignbuddy, args[0], params, in_args.keep_temp, quiet=in_args.quiet)
+            generated_trees = generate_tree(alignbuddy, args[0], params, in_args.keep_temp, quiet=in_args.quiet,
+                                            r_seed=in_args.random_seed)
         except (FileExistsError, AttributeError, ProcessLookupError, RuntimeError) as e:
             _raise_error(e, "generate_tree")
         except FileNotFoundError as e:
@@ -1306,7 +1383,7 @@ def command_line_ui(in_args, phylobuddy, skip_exit=False, pass_through=False):  
             hash_length = 10
 
         try:
-            hash_ids(phylobuddy, hash_length, hash_nodes)
+            hash_ids(phylobuddy, hash_length=hash_length, nodes=hash_nodes, r_seed=in_args.random_seed)
         except ValueError as e:
             if "Insufficient number of hashes available" in str(e):
                 holder = ceil(log(num_taxa(phylobuddy) * 2, 32))
@@ -1314,7 +1391,7 @@ def command_line_ui(in_args, phylobuddy, skip_exit=False, pass_through=False):  
                            "This is too small to properly cover all sequences, so it has been increased to %s.\n\n" %
                            (hash_length, holder), in_args.quiet)
                 hash_length = int(holder)
-                hash_ids(phylobuddy, hash_length, hash_nodes)
+                hash_ids(phylobuddy, hash_length=hash_length, nodes=hash_nodes, r_seed=in_args.random_seed)
             else:
                 raise e
 
@@ -1329,6 +1406,13 @@ def command_line_ui(in_args, phylobuddy, skip_exit=False, pass_through=False):  
         br._stderr(hash_table, in_args.quiet)
         _print_trees(phylobuddy)
         _exit("hash_ids")
+
+    # Ladderize
+    if in_args.ladderize:
+        ascending = True if not in_args.ladderize[0] or "rev" not in in_args.ladderize[0].lower() else False
+        phylobuddy = ladderize(phylobuddy, ascending)
+        _print_trees(phylobuddy)
+        _exit("ladderize")
 
     # List ids
     if in_args.list_ids:
@@ -1427,7 +1511,7 @@ def command_line_ui(in_args, phylobuddy, skip_exit=False, pass_through=False):  
 
     # Split polytomies
     if in_args.split_polytomies:
-        split_polytomies(phylobuddy)
+        split_polytomies(phylobuddy, r_seed=in_args.random_seed)
         _print_trees(phylobuddy)
         _exit("split_polytomies")
 
@@ -1450,14 +1534,15 @@ def main():
     except SystemExit:
         return False
     except Exception as _e:
-        function = ""
+        func = ""
         for next_arg in vars(initiation[0]):
             if getattr(initiation[0], next_arg) and next_arg in br.pb_flags:
-                function = next_arg
+                func = next_arg
                 break
-        br.send_traceback("PhyloBuddy", function, _e, VERSION)
+        br.send_traceback("PhyloBuddy", func, _e, VERSION)
         return False
     return True
+
 
 if __name__ == '__main__':
     main()

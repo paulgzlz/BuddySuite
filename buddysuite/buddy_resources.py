@@ -26,45 +26,51 @@ import sys
 if int(sys.version_info[0]) < 3:
     print("Error: Attempting to run BuddySuite with Python %s. Python 3+ required." % sys.version_info[0])
     sys.exit()
-import argparse
-import datetime
-from collections import OrderedDict
-import os
-from configparser import ConfigParser, NoOptionError
-import json
-import traceback
-import re
-import sre_compile
-from ftplib import FTP, all_errors
-from hashlib import md5
-from urllib import request
-from urllib.error import URLError, HTTPError, ContentTooShortError
-from multiprocessing import Process, cpu_count
-from time import time, sleep
-from math import floor
-from tempfile import TemporaryDirectory
-from shutil import copytree, rmtree, copyfile
-import string
-from random import choice
-import signal
-from pkg_resources import Requirement, resource_filename, DistributionNotFound
+else:
+    import argparse
+    import datetime
+    from collections import OrderedDict
+    import os
+    from configparser import ConfigParser, NoOptionError
+    import json
+    import traceback
+    import re
+    import sre_compile
+    from ftplib import FTP, all_errors
+    from hashlib import md5
+    from urllib import request
+    from urllib.error import URLError, HTTPError, ContentTooShortError
+    from multiprocessing import Process, cpu_count
+    from time import time, sleep
+    from math import floor
+    from tempfile import TemporaryDirectory
+    from shutil import copytree, rmtree, copyfile
+    import string
+    from io import StringIO
+    from random import choice
+    import signal
+    from pkg_resources import Requirement, resource_filename, DistributionNotFound
+    from subprocess import Popen, PIPE
 
-from Bio import AlignIO
-from Bio.SeqFeature import SeqFeature, FeatureLocation, CompoundLocation
-from Bio.Alphabet import IUPAC
+    from Bio import AlignIO, SeqIO
+    from Bio.SeqFeature import SeqFeature, FeatureLocation, CompoundLocation
+    from Bio.Alphabet import IUPAC
 
 
 # ################################################## MYFUNCS ################################################### #
 class Timer(object):
     def __init__(self):
-        self.current_time = round(time())
+        self.start_time = time()
 
     def start(self):
-        self.current_time = round(time())
+        self.start_time = time()
         return
 
+    def split(self):
+        return time() - self.start_time
+
     def end(self):
-        return pretty_time(round(time()) - self.current_time)
+        return pretty_time(round(time() - self.start_time))
 
 
 class RunTime(object):
@@ -176,6 +182,16 @@ class DynamicPrint(object):
         return
 
 
+def dummy_func(*args, **kwargs):
+    """
+    This can be placed in code for unit test monkey patching
+    :param args: arguments
+    :param kwargs: key-word arguments
+    :return:
+    """
+    return args, kwargs
+
+
 def pretty_time(seconds):
     if seconds < 60:
         output = "%i sec" % seconds
@@ -232,16 +248,14 @@ def usable_cpu_count():
     return max_processes
 
 
-def run_multicore_function(iterable, function, func_args=False, max_processes=0, quiet=False, out_type=sys.stdout):
+def run_multicore_function(iterable, func, func_args=False, max_processes=0, quiet=False, out_type=sys.stdout):
         # fun little piece of abstraction here... directly pass in a function that is going to be looped over, and
         # fork those loops onto independent processes. Any arguments the function needs must be provided as a list.
         if func_args and not isinstance(func_args, list):
             raise AttributeError("The arguments passed into the multi-thread function must be provided as a list")
-
         d_print = DynamicPrint(out_type)
         if max_processes == 0:
             max_processes = usable_cpu_count()
-
         else:
             cpus = cpu_count()
             if max_processes > cpus:
@@ -249,35 +263,39 @@ def run_multicore_function(iterable, function, func_args=False, max_processes=0,
             elif max_processes < 1:
                 max_processes = 1
 
-        max_processes = max_processes if max_processes < len(iterable) else len(iterable)
-
+        if hasattr(iterable, '__len__'):  # In case a generator is being passed in
+            max_processes = max_processes if max_processes < len(iterable) else len(iterable)
+            iter_len = len(iterable)
+        else:
+            max_processes = max_processes
+            iter_len = "???"
         running_processes = 0
         child_list = []
         start_time = round(time())
         elapsed = 0
         counter = 0
         if not quiet:
-            d_print.write("Running function %s() on %s cores\n" % (function.__name__, max_processes))
+            d_print.write("Running function %s() on %s cores\n" % (func.__name__, max_processes))
         # fire up the multi-core!!
         if not quiet:
-            d_print.write("\tJob 0 of %s" % len(iterable))
+            d_print.write("\tJob 0 of %s" % iter_len)
 
         for next_iter in iterable:
             if type(iterable) is dict:
                 next_iter = iterable[next_iter]
             if os.name == "nt":  # Multicore doesn't work well on Windows, so for now just run serial
-                function(next_iter, func_args)
+                func(next_iter, func_args)
                 continue
             while 1:     # Only fork a new process when there is a free processor.
                 if running_processes < max_processes:
                     # Start new process
                     if not quiet:
-                        d_print.write("\tJob %s of %s (%s)" % (counter, len(iterable), pretty_time(elapsed)))
+                        d_print.write("\tJob %s of %s (%s)" % (counter, iter_len, pretty_time(elapsed)))
 
                     if func_args:
-                        p = Process(target=function, args=(next_iter, func_args))
+                        p = Process(target=func, args=(next_iter, func_args))
                     else:
-                        p = Process(target=function, args=(next_iter,))
+                        p = Process(target=func, args=(next_iter,))
                     p.start()
                     child_list.append(p)
                     running_processes += 1
@@ -297,14 +315,13 @@ def run_multicore_function(iterable, function, func_args=False, max_processes=0,
                         if not quiet:
                             if (start_time + elapsed) < round(time()):
                                 elapsed = round(time()) - start_time
-                                d_print.write("\tJob %s of %s (%s)" % (counter, len(iterable), pretty_time(elapsed)))
-
+                                d_print.write("\tJob %s of %s (%s)" % (counter, iter_len, pretty_time(elapsed)))
                         if running_processes < max_processes:
                             break
 
         # wait for remaining processes to complete --> this is the same code as the processor wait loop above
         if not quiet:
-            d_print.write("\tJob %s of %s (%s)" % (counter, len(iterable), pretty_time(elapsed)))
+            d_print.write("\tJob %s of %s (%s)" % (counter, iter_len, pretty_time(elapsed)))
 
         while len(child_list) > 0:
             for i in range(len(child_list)):
@@ -314,15 +331,13 @@ def run_multicore_function(iterable, function, func_args=False, max_processes=0,
                     child_list.pop(i)
                     running_processes -= 1
                     break  # need to break out of the for-loop, because the child_list index is changed by pop
-
             if not quiet:
                 if (start_time + elapsed) < round(time()):
                     elapsed = round(time()) - start_time
-                    d_print.write("\t%s total jobs (%s, %s jobs remaining)" % (len(iterable), pretty_time(elapsed),
+                    d_print.write("\t%s total jobs (%s, %s jobs remaining)" % (iter_len, pretty_time(elapsed),
                                                                                len(child_list)))
-
         if not quiet:
-            d_print.write("\tDONE: %s jobs in %s\n" % (len(iterable), pretty_time(elapsed)))
+            d_print.write("\tDONE: %s jobs in %s\n" % (counter, pretty_time(elapsed)))
         # func_args = []  # This may be necessary because of weirdness in assignment of incoming arguments
         return
 
@@ -339,13 +354,24 @@ class TempDir(object):
         yield tmp_dir
         rmtree(self.path)
 
+    def copy_to(self, src):
+        full_path = os.path.abspath(src)
+        end_path = os.path.split(full_path)[1]
+        if os.path.isdir(src):
+            copytree(src, os.path.join(self.path, end_path))
+        elif os.path.isfile(src):
+            copyfile(src, os.path.join(self.path, end_path))
+        else:
+            return False
+        return os.path.join(self.path, end_path)
+
     def subdir(self, dir_name=None):
         if not dir_name:
             dir_name = "".join([choice(string.ascii_letters + string.digits) for _ in range(10)])
             while dir_name in self.subdirs:  # Catch the very unlikely case that a duplicate occurs
                 dir_name = "".join([choice(string.ascii_letters + string.digits) for _ in range(10)])
 
-        subdir_path = "%s%s%s" % (self.path, os.path.sep, dir_name)
+        subdir_path = os.path.join(self.path, dir_name)
         if not os.path.exists(subdir_path):
             os.mkdir(subdir_path)
         if dir_name not in self.subdirs:
@@ -355,7 +381,7 @@ class TempDir(object):
     def del_subdir(self, _dir):
         path, _dir = os.path.split(_dir)
         del self.subdirs[self.subdirs.index(_dir)]
-        rmtree("%s%s%s" % (self.path, os.path.sep, _dir))
+        rmtree(os.path.join(self.path, _dir))
         return
 
     def subfile(self, file_name=None):
@@ -365,18 +391,18 @@ class TempDir(object):
             while file_name in files:  # Catch the very unlikely case that a duplicate occurs
                 file_name = "".join([choice(string.ascii_letters + string.digits) for _ in range(10)])
 
-        open("%s%s%s" % (self.path, os.path.sep, file_name), "w", encoding="utf-8").close()
+        open(os.path.join(self.path, file_name), "w", encoding="utf-8").close()
         self.subfiles.append(file_name)
-        return "%s%s%s" % (self.path, os.path.sep, file_name)
+        return os.path.join(self.path, file_name)
 
     def del_subfile(self, _file):
         path, _file = os.path.split(_file)
         del self.subfiles[self.subfiles.index(_file)]
-        os.remove("%s%s%s" % (self.path, os.path.sep, _file))
+        os.remove(os.path.join(self.path, _file))
         return
 
     def save(self, location, keep_hash=False):
-        location = location if not keep_hash else "%s%s%s" % (location, os.path.sep, os.path.split(self.path)[-1])
+        location = location if not keep_hash else os.path.join(location, os.path.split(self.path)[-1])
         if os.path.isdir(location):
             print("Save Error: Indicated output folder already exists in TempDir.save(%s)" % location, file=sys.stderr)
             return False
@@ -387,21 +413,23 @@ class TempDir(object):
 
 class TempFile(object):
     # I really don't like the behavior of tempfile.[Named]TemporaryFile(), so hack TemporaryDirectory() via TempDir()
-    def __init__(self, mode="w", byte_mode=False):
+    def __init__(self, mode="w", byte_mode=False, encoding="utf-8"):
         self._tmp_dir = TempDir()  # This needs to be a persistent (ie self.) variable, or the directory will be deleted
         path, dir_hash = os.path.split(self._tmp_dir.path)
         self.name = dir_hash
-        self.path = "%s%s%s" % (self._tmp_dir.path, os.path.sep, dir_hash)
-        open(self.path, "w", encoding="utf-8").close()
+        self.path = os.path.join(self._tmp_dir.path, dir_hash)
+        open(self.path, "w", encoding=encoding).close()
         self.handle = None
         self.bm = "b" if byte_mode else ""
         self.mode = mode
+        self.encoding = encoding
 
     def open(self, mode=None):
         mode = "%s%s" % (self.mode, self.bm) if not mode else "%s%s" % (mode, self.bm)
         if self.handle:
             self.close()
-        self.handle = open(self.path, mode)
+        encoding = None if self.bm or "b" in mode else self.encoding
+        self.handle = open(self.path, mode, encoding=encoding)
 
     def close(self):
         if self.handle:
@@ -435,7 +463,8 @@ class TempFile(object):
         if already_open:
             position = self.handle.tell()
             self.close()
-        with open(self.path, "r%s" % self.bm) as ifile:
+        encoding = None if self.bm else self.encoding
+        with open(self.path, "r%s" % self.bm, encoding=encoding) as ifile:
             content = ifile.read()
         if already_open:
             self.open(mode="a")
@@ -449,7 +478,8 @@ class TempFile(object):
         return
 
     def save(self, location):
-        with open(location, "w%s" % self.bm) as ofile:
+        encoding = None if self.bm else self.encoding
+        with open(location, "w%s" % self.bm, encoding=encoding) as ofile:
             ofile.write(self.read())
         return
 
@@ -505,7 +535,7 @@ def copydir(source, dest):
         files = []
         dirs = []
         for thing in contents:
-            thing_path = "%s%s%s" % (_dir, os.path.sep, thing)
+            thing_path = os.path.join(_dir, thing)
             if os.path.isdir(thing_path):
                 dirs.append(thing_path)
             else:
@@ -520,7 +550,7 @@ def copydir(source, dest):
         os.makedirs(dest)
     for path in file_paths:
         _path, _file = os.path.split(path)
-        copyfile(path, "%s%s%s" % (dest, os.path.sep, _file))
+        copyfile(path, os.path.join(dest, _file))
 
 
 def ask(input_prompt, default="yes", timeout=0):
@@ -579,6 +609,19 @@ def ask(input_prompt, default="yes", timeout=0):
         return False
 
 
+def num_sorted(input_list):
+    """
+    Sort a list of strings in the way that takes embedded numbers into account
+    """
+    def convert(text):
+        return int(text) if text.isdigit() else text
+
+    def alpha_num_key(key):
+        return [convert(c) for c in re.split('([0-9]+)', key)]
+
+    return sorted(input_list, key=alpha_num_key)
+
+
 # ##################################################### CLASSES ###################################################### #
 class GuessError(Exception):
     """Raised when input format cannot be guessed"""
@@ -608,7 +651,7 @@ class Contributor(object):
 
     def name(self):
         _name = " ".join([self.first, self.middle, self.last])
-        _name = re.sub("  ", " ", _name)  # in case there is no middle name
+        _name = re.sub(" {2}", " ", _name)  # in case there is no middle name
         return _name
 
     def __str__(self):
@@ -633,7 +676,7 @@ class Usage(object):
         self.config = config_values()
         usage_file = None
         if self.config["diagnostics"] and self.config["data_dir"]:
-            usage_file = "%s%sbuddysuite_usage.json" % (self.config["data_dir"], os.path.sep)
+            usage_file = os.path.join(self.config["data_dir"], "buddysuite_usage.json")
             try:
                 if not os.path.isfile(usage_file):
                     with open(usage_file, "w", encoding="utf-8") as ofile:
@@ -700,11 +743,11 @@ class Usage(object):
 
 
 class Version(object):
-    def __init__(self, name, major, minor, _contributors, release_date=None):
+    def __init__(self, name, major, minor, contributors, release_date=None):
         self.name = name
         self.major = major
         self.minor = minor
-        self.contributors = _contributors  # This needs to be a list of Contributor objects
+        self.contributors = contributors  # This needs to be a list of Contributor objects
         if not release_date:
             self.release_date = datetime.date.today()
         else:
@@ -731,15 +774,25 @@ class Version(object):
 %s %s.%s (%s)
 
 Public Domain Notice
+--------------------
 This is free software; see the source for detailed copying conditions.
 There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A
 PARTICULAR PURPOSE.
 Questions/comments/concerns can be directed to Steve Bond, steve.bond@nih.gov
+--------------------
 
 Contributors:
 %s
 ''' % (self.name, self.major, self.minor, self.release_date, self.contributors_string())
         return _output
+
+
+# #################################################### DECORATORS #################################################### #
+def skip_windows(func):
+    def quick_return():
+        return
+
+    return func if os.name != "nt" else quick_return
 
 
 # #################################################### FUNCTIONS ##################################################### #
@@ -750,7 +803,7 @@ def config_values():
                "shortcuts": ""}
     try:
         config_file = resource_filename(Requirement.parse("buddysuite"),
-                                        "buddysuite{0}buddy_data{0}config.ini".format(os.path.sep))
+                                        os.path.join("buddysuite", "buddy_data", "config.ini"))
         config = ConfigParser()
         config.read(config_file)
         for _key, value in options.items():
@@ -762,7 +815,8 @@ def config_values():
             except KeyError:
                 options[_key] = value
         options["shortcuts"] = options["shortcuts"].split(",")
-        options["data_dir"] = resource_filename(Requirement.parse("buddysuite"), "buddysuite%sbuddy_data" % os.path.sep)
+        options["data_dir"] = resource_filename(Requirement.parse("buddysuite"),
+                                                os.path.join("buddysuite", "buddy_data"))
         if not os.path.isdir(options["data_dir"]):
             options["data_dir"] = False
     except (DistributionNotFound, KeyError, NoOptionError):  # This occurs when buddysuite isn't installed
@@ -906,58 +960,224 @@ def flags(parser, _positional=None, _flags=None, _modifiers=None, version=None):
         misc.add_argument('-v', '--version', action='version', version=str(version))
 
 
-def parse_format(_format):
-    available_formats = ["clustal", "embl", "fasta", "genbank", "gb", "nexus", "stockholm",
+def identify_msa_program(msa_alias):
+    # Figure out what tool is being used
+    tool_list = {'mafft': {"ver": " --help", "check": "MAFFT v[0-9]\.[0-9]+", "ver_num": "v([0-9]\.[0-9]+)",
+                           "url": "http://mafft.cbrc.jp/alignment/software/", "name": "mafft"},
+                 'prank': {"ver": " -help", "check": "prank v[0-9]*\.[0-9]+", "ver_num": "v([0-9]*\.[0-9]+)",
+                           "url": "http://wasabiapp.org/software/prank/prank_installation/", "name": "prank"},
+                 'pagan': {"ver": " -v", "check": "This is PAGAN", "ver_num": "v\.([0-9]+\.[0-9]+)",
+                           "url": "http://wasabiapp.org/software/pagan/pagan_installation/", "name": "pagan"},
+                 'muscle': {"ver": " -version", "check": "Robert C. Edgar", "ver_num": "v([0-9]+\.[0-9]+\.[0-9]+)",
+                            "url": "http://www.drive5.com/muscle/downloads.htm", "name": "muscle"},
+                 'clustalw': {"ver": " -help", "check": "CLUSTAL.*Multiple Sequence Alignments",
+                              "ver_num": "CLUSTAL ([0-9]+\.[0-9]+) ",
+                              "url": "http://www.clustal.org/clustal2/#Download", "name": "clustalw"},
+                 'clustalo': {"ver": " -h", "check": "Clustal Omega - [0-9]+\.[0-9]+",
+                              "ver_num": "Omega - ([0-9]+\.[0-9]+)",
+                              "url": "http://www.clustal.org/omega/#Download", "name": "clustalo"}}
+
+    if msa_alias.lower() in tool_list:
+        return tool_list[msa_alias.lower()]
+    else:
+        for prog in tool_list:
+            if prog in msa_alias.lower():
+                return tool_list[prog]
+
+    for prog, args in tool_list.items():
+        version = Popen("%s%s" % (msa_alias, args["ver"]), shell=True, stderr=PIPE, stdout=PIPE).communicate()
+        if re.search(args['check'], version[0].decode()) or re.search(args['check'], version[1].decode()):
+            return tool_list[prog]
+    return False
+
+
+def parse_format(fmt_check):
+    available_formats = ("clustal", "embl", "fasta", "genbank", "gb", "nexus", "nexuss",
+                         "nexusi", "nexus-sequential", "nexus-interleaved", "stockholm",
                          "phylip", "phylipis", "phylip-strict", "phylip-interleaved-strict",
                          "phylipi", "phylip-relaxed", "phylip-interleaved", "phylipr",
                          "phylips", "phylipsr", "phylip-sequential", "phylip-sequential-relaxed",
-                         "phylipss", "phylip-sequential-strict", "nexml", "newick"]
+                         "phylipss", "phylip-sequential-strict", "seqxml", "nexml", "newick")
 
-    _format = _format.lower()
-    if _format in ["phylip", "phylipis", "phylip-strict", "phylip-interleaved-strict"]:
-        return "phylip"
+    fmt_check = fmt_check.lower()
+    if fmt_check in ("phylip", "phylipis", "phylip-strict", "phylip-interleaved-strict"):
+        fmt_check = "phylip"
+    elif fmt_check in ("phylipi", "phylip-relaxed", "phylip-interleaved", "phylipr"):
+        fmt_check = "phylip-relaxed"
+    elif fmt_check in ("phylips", "phylipsr", "phylip-sequential", "phylip-sequential-relaxed"):
+        fmt_check = "phylipsr"
+    elif fmt_check in ("phylipss", "phylip-sequential-strict"):
+        fmt_check = "phylipss"
+    elif fmt_check in ("nexuss", "nexus-sequential"):
+        fmt_check = "nexuss"
+    elif fmt_check in ("nexusi", "nexus-interleaved"):
+        fmt_check = "nexusi"
 
-    if _format in ["phylipi", "phylip-relaxed", "phylip-interleaved", "phylipr"]:
-        return "phylip-relaxed"
+    if fmt_check not in available_formats:
+        raise TypeError("Format type '%s' is not recognized/supported" % fmt_check)
 
-    if _format in ["phylips", "phylipsr", "phylip-sequential", "phylip-sequential-relaxed"]:
-        return "phylipsr"
-
-    if _format in ["phylipss", "phylip-sequential-strict"]:
-        return "phylipss"
-
-    if _format not in available_formats:
-        raise TypeError("Format type '%s' is not recognized/supported" % _format)
-
-    return _format
+    return fmt_check
 
 
-def phylip_sequential_out(_input, relaxed=True, _type="alignbuddy"):
-    output = ""
-    if _type == "alignbuddy":
-        alignments = _input.alignments
+def guess_format(_input):
+    """
+    Check the formats that BioPython has a parser for.
+    :param _input: Duck-typed; can be list, SeqBuddy object, file handle, or file path.
+    :return: str or None
+    """
+    # If input is just a list, there is no BioPython in-format. Default to gb.
+    if isinstance(_input, list):
+        return "gb"
+
+    # Pull value directly from object if appropriate
+    if _input.__class__.__name__ == "SeqBuddy":
+        return _input.in_format
+
+    if _input.__class__.__name__ == "AlignBuddy":
+        return _input.in_format
+
+    # If input is a handle or path, try to read the file in each format, and assume success if not error and # seqs > 0
+    if os.path.isfile(str(_input)):
+        _input = open(_input, "r", encoding="utf-8")
+
+    if str(type(_input)) == "<class '_io.TextIOWrapper'>" or isinstance(_input, StringIO):
+        if not _input.seekable():  # Deal with input streams (e.g., stdout pipes)
+            _input = StringIO(_input.read())
+        if _input.read() == "":
+            return "empty file"
+        _input.seek(0)
+
+        for line in _input:
+            if line.isspace() or line.startswith("//"):
+                continue
+
+            # Fasta
+            elif line.startswith(">"):
+                _input.seek(0)
+                return "fasta"
+
+            # GenBank
+            elif line.startswith("LOCUS  "):
+                _input.seek(0)
+                return "gb"
+
+            # Stockholm
+            elif line.startswith("# STOCKHOLM"):
+                _input.seek(0)
+                return "stockholm"
+
+            # NEXUS
+            elif line.startswith("#NEXUS"):
+                _input.seek(0)
+                return "nexus"
+
+            # CLUSTAL
+            elif line.startswith("CLUSTAL") or line.startswith("MUSCLE"):
+                _input.seek(0)
+                return "clustal"
+
+            # FASTQ
+            elif line.startswith("@"):
+                _input.seek(0)
+                return "fastq"
+
+            # SeqXML
+            elif line.startswith("<?xml"):
+                _input.seek(0)
+                return "seqxml"
+
+            else:
+                break
+        _input.seek(0)
+
+        # Can't determine from file header
+        possible_formats = ["phylipss", "phylipsr", "phylip", "phylip-relaxed", "embl", "swiss"]
+
+        for next_format in possible_formats:
+            try:
+                _input.seek(0)
+                if next_format in ["phylip", "phylipsr", "phylipss"]:
+                    phylip = phylip_guess(next_format, _input)
+                    if phylip:
+                        return phylip
+                    else:
+                        continue
+                seqs = SeqIO.parse(_input, next_format)
+                if next(seqs):
+                    _input.seek(0)
+                    return next_format
+                else:
+                    continue
+            except AssertionError as err:
+                if next_format == 'swiss':
+                    continue
+                else:
+                    raise err
+            except (ValueError, StopIteration, PhylipError):
+                continue
+        return None  # Unable to determine format from file handle
+
     else:
-        alignments = [_input.records]
+        raise GuessError("Unsupported _input argument in guess_format(). %s" % _input)
 
-    for alignment in alignments:
+
+def nexus_out(record_src, out_format):
+    if hasattr(record_src, "alignments"):
+        if len(record_src.alignments) > 1:
+            raise ValueError("NEXUS format does not support multiple alignments in one file.\n")
+        alignment = record_src.alignments[0]
+    elif hasattr(record_src, "records"):
+        alignment = AlignIO.MultipleSeqAlignment(record_src.records, alphabet=record_src.alpha)
+    elif type(record_src) in (list, tuple):
+        alignment = AlignIO.MultipleSeqAlignment(list(record_src))
+    else:
+        raise AttributeError("`record_src` input type '%s' not support by nexus_out.\n" % type(record_src))
+
+    tmp_file = TempFile()
+    writer = AlignIO.NexusIO.NexusWriter(tmp_file.get_handle("w"))
+    if out_format == "nexus":
+        writer.write_alignment(alignment)
+    elif out_format == "nexuss":
+        writer.write_alignment(alignment, interleave=False)
+    elif out_format == "nexusi":
+        writer.write_alignment(alignment, interleave=True)
+    else:
+        raise AttributeError("Unknown NEXUS format '%s'." % out_format)
+    output = tmp_file.read()
+    tmp_file.close()
+    return output
+
+
+def phylip_sequential_out(record_src, relaxed=True):
+    output = ""
+    if hasattr(record_src, "alignments"):
+        records = record_src.alignments
+    elif hasattr(record_src, "records"):
+        records = [record_src.records]
+    elif type(record_src) in (list, tuple):
+        records = [list(record_src)]
+    else:
+        raise AttributeError("`record_src` input type '%s' not support by nexus_out.\n" % type(record_src))
+
+    for rec_set in records:
         ids = []
         id_check = []
         aln_len = 0
-        for rec in alignment:
+        for rec in rec_set:
             if rec.id in id_check:
                 raise PhylipError("Malformed Phylip --> Repeat id '%s'" % rec.id)
             id_check.append(rec.id)
-            if not aln_len:
+            if aln_len == 0:
                 aln_len = len(str(rec.seq))
 
         max_id_len = 0
-        for rec in alignment:
+        for rec in rec_set:
             if len(str(rec.seq)) != aln_len:
                 raise PhylipError("Malformed Phylip --> The length of record '%s' is incorrect" % rec.id)
             max_id_len = len(rec.id) if len(rec.id) > max_id_len else max_id_len
 
-        output += " %s %s" % (len(alignment), aln_len)
-        for rec in alignment:
+        output += " %s %s" % (len(rec_set), aln_len)
+        for rec in rec_set:
             if relaxed:
                 seq_id = re.sub('[ \t]+', '_', rec.id)
                 output += "\n%s%s" % (seq_id.ljust(max_id_len + 2), rec.seq)
@@ -1117,7 +1337,7 @@ def replacements(input_str, query, replace="", num=0):
     return input_str
 
 
-def send_traceback(tool, function, e, version):
+def send_traceback(tool, func, e, version):
     now = datetime.datetime.now()
     config = config_values()
     tb = ""
@@ -1128,15 +1348,15 @@ def send_traceback(tool, function, e, version):
             _line = re.sub('"{0}.*{0}(.*)?"'.format(os.sep), r'"\1"', _line)
         tb += _line
     bs_version = "# %s: %s\n" % (tool, version.short())
-    func = "# Function: %s\n" % function
+    full_func = "# Function: %s\n" % func
     platform = "# Platform: %s\n" % sys.platform
     python = "# Python: %s\n" % re.sub("[\n\r]", "", sys.version)
     user = "# User: %s\n" % config['user_hash']
     date = "# Date: %s\n\n" % now.strftime('%Y-%m-%d')
     error = "%s: %s\n\n" % (type(e).__name__, e)
 
-    tb = "".join([bs_version, func, python, platform, user, date, error, tb])
-    print("\033[m%s::%s has crashed with the following traceback:\033[91m\n\n%s\n\n\033[m" % (tool, function, tb))
+    tb = "".join([bs_version, full_func, python, platform, user, date, error, tb])
+    print("\033[m%s::%s has crashed with the following traceback:\033[91m\n\n%s\n\n\033[m" % (tool, func, tb))
     error_report(tb, config["diagnostics"])
     return
 
@@ -1382,6 +1602,7 @@ def isfile_override(path):
             raise err
     return stat.S_ISREG(st.st_mode)
 
+
 if os.name == "nt":
     os.path.isfile = isfile_override
 
@@ -1414,21 +1635,24 @@ def clean_regex(patterns, quiet=False):
 
 # #################################################### VARIABLES ##################################################### #
 
-contributors = [Contributor("Stephen", "Bond", commits=1055, github="https://github.com/biologyguy"),
-                Contributor("Karl", "Keat", commits=392, github="https://github.com/KarlKeat"),
-                Contributor("Jeremy", "Labarge", commits=26, github="https://github.com/biojerm"),
-                Contributor("Dustin", "Mitchell", commits=12, github="https://github.com/djmitche"),
-                Contributor("Jason", "Bowen", commits=6, github="https://github.com/jwbowen"),
-                Contributor("Todd", "Smith", commits=5, github="https://github.com/etiology"),
-                Contributor("Sofia", "Barreira", commits=2, github="https://github.com/alicarea"),
-                Contributor("Alexander", "Jones", commits=2, github="https://github.com/alexanjm"),
-                Contributor("Adam", "Palmer", commits=2, github="https://github.com/apalm112"),
-                Contributor("Helena", "Mendes-Soares", commits=1, github="https://github.com/mendessoares")]
+
+contributor_list = [Contributor("Stephen", "Bond", commits=1149, github="https://github.com/biologyguy"),
+                    Contributor("Karl", "Keat", commits=392, github="https://github.com/KarlKeat"),
+                    Contributor("Jeremy", "Labarge", commits=26, github="https://github.com/biojerm"),
+                    Contributor("Paul", "Gonzalez", commits=13, github="https://github.com/paulgzlz"),
+                    Contributor("Dustin", "Mitchell", commits=12, github="https://github.com/djmitche"),
+                    Contributor("Connor", "Skennerton", commits=6, github="https://github.com/ctSkennerton"),
+                    Contributor("Jason", "Bowen", commits=6, github="https://github.com/jwbowen"),
+                    Contributor("Todd", "Smith", commits=5, github="https://github.com/etiology"),
+                    Contributor("Sofia", "Barreira", commits=2, github="https://github.com/alicarea"),
+                    Contributor("Alex", "Jones", commits=2, github="https://github.com/alexanjm"),
+                    Contributor("Adam", "Palmer", commits=2, github="https://github.com/apalm112"),
+                    Contributor("Helena", "Mendes-Soares", commits=1, github="https://github.com/mendessoares")]
 
 # NOTE: If this is added to, be sure to update the unit test!
 format_to_extension = {'fasta': 'fa', 'fa': 'fa', 'genbank': 'gb', 'gb': 'gb', 'newick': 'nwk', 'nwk': 'nwk',
                        'nexus': 'nex', 'nex': 'nex', 'phylip': 'phy', 'phy': 'phy', 'phylip-relaxed': 'phyr',
-                       'phyr': 'phyr', 'phylipss': 'physs', 'physs': 'physs', 'phylipsr': 'physr',
+                       'phyr': 'phyr', 'phylipss': 'physs', 'physs': 'physs', 'phylipsr': 'physr', 'embl': 'embl',
                        'physr': 'physr', 'stockholm': 'stklm', 'stklm': 'stklm', 'clustal': 'clus', 'clus': 'clus'}
 
 
@@ -1440,7 +1664,12 @@ bsi_flags = {"cmd_line": {"flag": "cmd",
 
 bsi_modifiers = {}
 # ##################################################### SEQBUDDY ##################################################### #
-sb_flags = {"annotate": {"flag": "ano",
+sb_flags = {"amend_metadata": {"flag": "amd",
+                               "action": "append",
+                               "nargs": "+",
+                               "metavar": "<attribute> [substitution_value] [regex]",
+                               "help": "Delete, add, or modify record attributes"},
+            "annotate": {"flag": "ano",
                          "nargs": "*",
                          "metavar": "args",
                          "help": "Add a feature (annotation) to selected sequences. "
@@ -1520,6 +1749,11 @@ sb_flags = {"annotate": {"flag": "ano",
                                "help": "Remove records from a file (deleted IDs are sent to stderr). "
                                        "Regular expressions are understood, and an int as the final argument will"
                                        "specify number of columns for deleted IDs"},
+            "delete_recs_with_feature": {"flag": "drf",
+                                         "action": "store",
+                                         "nargs": "+",
+                                         "metavar": "<regex>",
+                                         "help": "Remove all the records with ids containing a given string"},
             "delete_repeats": {"flag": "drp",
                                "action": "append",
                                "nargs": "*",
@@ -1531,6 +1765,11 @@ sb_flags = {"annotate": {"flag": "ano",
                              "metavar": "<threshold (int)>",
                              "type": int,
                              "help": "Delete sequences with length below threshold"},
+            "delete_taxa": {"flag": "dt",
+                            "nargs": "+",
+                            "action": "append",
+                            "metavar": "taxon",
+                            "help": "Remove all records matching given taxa"},
             "extract_feature_sequences": {"flag": "efs",
                                           "action": "append",
                                           "nargs": "+",
@@ -1546,8 +1785,10 @@ sb_flags = {"annotate": {"flag": "ano",
                          "action": "store_true",
                          "help": "Predict regions under strong purifying selection based on high CpG content"},
             "find_orfs": {"flag": "orf",
-                          "action": "store_true",
-                          "help": "Finds all the open reading frames in the sequences and their reverse complements."},
+                          "action": "append",
+                          "nargs": '*',
+                          "metavar": ("[min size (int)]", "[reverse comp (True|False)]"),
+                          "help": "Finds all the open reading frames, or set a minimum threshold size."},
             "find_pattern": {"flag": "fp",
                              "action": "store",
                              "nargs": "+",
@@ -1587,21 +1828,33 @@ sb_flags = {"annotate": {"flag": "ano",
             "guess_format": {"flag": "gf",
                              "action": "store_true",
                              "help": "Glean the flat file format of input file(s)"},
-            "hash_seq_ids": {"flag": "hsi",
-                             "action": "append",
-                             "nargs": "?",
-                             "type": int,
-                             "metavar": "hash length (int)",
-                             "help": "Rename all sequence IDs to fixed length hashes. "
-                                     "Default length is 10."},
+            "hash_ids": {"flag": "hi",
+                         "action": "append",
+                         "nargs": "?",
+                         "type": int,
+                         "metavar": "hash length (int)",
+                         "help": "Rename all sequence IDs to fixed length hashes. "
+                                 "Default length is 10."},
             "insert_seq": {"flag": "is",
                            "action": "append",
                            "nargs": "*",
                            "metavar": ("<sequence>", "<front|rear|index(int)>"),
                            "help": "Insert a sequence at the desired location"},
+            "in_silico_digest": {"flag": "isd",
+                                 "action": "append",
+                                 "nargs": "*",
+                                 "metavar": "",
+                                 "help": "Restriction digest. Args: [enzymes "
+                                         "{specific enzymes, commercial, all}], [Num cuts (int) [num cuts]], "
+                                         "[order {alpha, position}]"},
             "isoelectric_point": {"flag": "ip",
                                   "action": "store_true",
                                   "help": "Calculate isoelectric points"},
+            "keep_taxa": {"flag": "kt",
+                          "nargs": "+",
+                          "action": "append",
+                          "metavar": "taxon",
+                          "help": "Keep all records matching given taxa"},
             "list_features": {"flag": "lf",
                               "action": "store_true",
                               "help": "Print out all sequence annotations"},
@@ -1630,10 +1883,20 @@ sb_flags = {"annotate": {"flag": "ano",
                                        "help": "Take the features annotated onto protein sequences "
                                                "and map to cDNA sequences. Both a protein and "
                                                "cDNA file must be passed in"},
+            "max_recs": {"flag": "max",
+                         "action": "append",
+                         "nargs": "?",
+                         "type": int,
+                         "help": "Return the largest record(s)"},
             "merge": {"flag": "mrg",
                       "action": "store_true",
                       "help": "Merge multiple copies of sequence records together, "
                               "combining their feature lists"},
+            "min_recs": {"flag": "min",
+                         "action": "append",
+                         "nargs": "?",
+                         "type": int,
+                         "help": "Return the shortest record(s)"},
             "molecular_weight": {"flag": "mw",
                                  "action": "store_true",
                                  "help": "Compute the molecular weight of sequences"},
@@ -1660,6 +1923,17 @@ sb_flags = {"annotate": {"flag": "ano",
             "order_ids_randomly": {"flag": "oir",
                                    "action": "store_true",
                                    "help": "Randomly reorder the position of each record"},
+            "order_recs_by_len": {"flag": "obl",
+                                  "action": "append",
+                                  "nargs": "?",
+                                  "metavar": "'rev'",
+                                  "help": "Sort records by sequence length (short-to-long)"},
+            "prepend_organism": {"flag": "ppo",
+                                 "action": "append",
+                                 "nargs": "?",
+                                 "type": int,
+                                 "metavar": "Prefix length (default=4)",
+                                 "help": "Prefix all IDs with organism identifier"},
             "prosite_scan": {"flag": "psc",
                              "action": "append",
                              "nargs": "?",
@@ -1723,6 +1997,20 @@ sb_flags = {"annotate": {"flag": "ano",
             "shuffle_seqs": {"flag": "ss",
                              "action": "store_true",
                              "help": "Randomly rearrange the residues in each record"},
+            "split_by_x_files": {"flag": "sxf",
+                                 "action": "append",
+                                 "nargs": "*",
+                                 "help": "Splits with set number of output files"},
+            "split_by_x_seqs": {"flag": "sxs",
+                                "action": "append",
+                                "nargs": "*",
+                                "help": "Splits with set number of records per file"},
+            "taxonomic_breakdown": {"flag": "tb",
+                                    "action": "append",
+                                    "nargs": "?",
+                                    "type": int,
+                                    "metavar": "Depth (int)",
+                                    "help": "Show taxonomic spread of sequences"},
             "transcribe": {"flag": "d2r",
                            "action": "store_true",
                            "help": "Convert DNA sequences to RNA"},
@@ -1742,24 +2030,36 @@ sb_flags = {"annotate": {"flag": "ano",
                           "help": "Convert all sequences to uppercase"}}
 
 sb_modifiers = {"alpha": {"flag": "a",
+                          "metavar": "     <alphabet>",
                           "action": "store",
                           "help": "If you want the file read with a specific alphabet"},
                 "in_format": {"flag": "f",
+                              "metavar": " <format>",
                               "action": "store",
                               "help": "If SeqBuddy can't guess the file format, try specifying it directly"},
                 "in_place": {"flag": "i",
                              "action": "store_true",
                              "help": "Rewrite the input file in-place. Be careful!"},
                 "keep_temp": {"flag": "k",
+                              "metavar": " <directory>",
                               "action": "store",
-                              "help": "Save temporary files created by generate_tree in current working directory"},
+                              "help": "If temporary files are created, save them to specified dir."},
                 "out_format": {"flag": "o",
-                               "metavar": "",
+                               "metavar": "<format>",
                                "action": "store",
                                "help": "If you want a specific format output"},
                 "quiet": {"flag": "q",
                           "action": "store_true",
                           "help": "Suppress stderr messages"},
+                "restrict": {"flag": "r",
+                             "action": "append",
+                             "nargs": "+",
+                             "metavar": "  <regex>",
+                             "help": "Specify which records are modified (all are returned still)"},
+                "random_seed": {"flag": "s",
+                                "action": "store",
+                                "type": int,
+                                "help": "Specify a random seed value"},
                 "test": {"flag": "t",
                          "action": "store_true",
                          "help": "Run the function and return any stderr/stdout other than sequences"}}
@@ -1788,8 +2088,16 @@ alb_flags = {"alignment_lengths": {"flag": "al",
                                    "help": "Concatenates two or more alignments using a regex pattern or fixed length "
                                            "prefix to group record ids."},
              "consensus": {"flag": "con",
-                           "action": "store_true",
-                           "help": "Create majority-rule consensus sequences"},
+                           "action": "append",
+                           "nargs": "?",
+                           "metavar": "simple, weighted",
+                           "help": "Create consensus sequences (majority rule or weighted)"},
+             "delete_invariant_sites": {"flag": "dinv",
+                                        "nargs": "?",
+                                        "action": "append",
+                                        "metavar": "'ambiguous'",
+                                        "help": "Remove columns where all residues are identical (include 'ambiguous' "
+                                                "to be more strict)"},
              "delete_records": {"flag": "dr",
                                 "nargs": "+",
                                 "action": "store",
@@ -1798,6 +2106,12 @@ alb_flags = {"alignment_lengths": {"flag": "al",
              "enforce_triplets": {"flag": "et",
                                   "action": "store_true",
                                   "help": "Shift gaps so sequences are organized in triplets"},
+             "faux_align": {"flag": "fa",
+                            "action": "append",
+                            "nargs": "?",
+                            "type": int,
+                            "metavar": "length (int)",
+                            "help": "Randomly insert gaps to create a meaningless alignment"},
              "extract_feature_sequences": {"flag": "efs",
                                            "action": "append",
                                            "nargs": "+",
@@ -1815,6 +2129,11 @@ alb_flags = {"alignment_lengths": {"flag": "al",
                                     "metavar": "args",
                                     "help": "Create a new alignment from unaligned sequences. "
                                             "args: [alignment program] [optional params]"},
+             "generate_hmm": {"flag": "gh",
+                              "action": "append",
+                              "nargs": "?",
+                              "metavar": "hmmbuild alias",
+                              "help": "Create hidden Markov models using HMMER3"},
              "hash_ids": {"flag": "hi",
                           "action": "append",
                           "nargs": "?",
@@ -1845,6 +2164,12 @@ alb_flags = {"alignment_lengths": {"flag": "al",
                            "choices": ["rev"],
                            "help": "Sort all sequences in an alignment by id in alpha-numeric order. "
                                    "Pass in the word 'rev' to reverse order"},
+             "percent_id": {"flag": "pi",
+                            "action": "store_true",
+                            "help": "Print a matrix of percent id among sequences in the alignment"},
+             "pos_freq_mat":{"flag": "pfm",
+                             "action": "store_true",
+                             "help": "Output a position frequency matrix."},
              "pull_records": {"flag": "pr",
                               "nargs": "+",
                               "action": "append",
@@ -1898,13 +2223,23 @@ alb_modifiers = {"in_format": {"flag": "f",
                  "quiet": {"flag": "q",
                            "action": "store_true",
                            "help": "Suppress stderr messages"},
+                 "random_seed": {"flag": "s",
+                                "action": "store",
+                                "type": int,
+                                "help": "Specify a random seed value"},
                  "test": {"flag": "t",
                           "action": "store_true",
                           "help": "Run the function and return any stderr/stdout other than sequences"}}
 
 # #################################################### PHYLOBUDDY #################################################### #
 
-pb_flags = {"collapse_polytomies": {"flag": "cpt",
+pb_flags = {"add_branch": {"flag": "ab",
+                           "nargs": "*",
+                           "action": "append",
+                           "metavar": "args",
+                           "help": "Add a new taxon or subtree to existing tree. "
+                                   "args: <branch/subtree> <sister> [sister]"},
+            "collapse_polytomies": {"flag": "cpt",
                                     "action": "append",
                                     "nargs": "*",
                                     "metavar": ("threshold", "{'bootstrap', 'length'}"),
@@ -1916,7 +2251,9 @@ pb_flags = {"collapse_polytomies": {"flag": "cpt",
                                "metavar": "min frequency (default 0.5)",
                                "help": "Generate a consensus tree"},
             "display_trees": {"flag": "dt",
-                              "action": "store_true",
+                              "action": "append",
+                              "nargs": "?",
+                              "metavar": "Display program ([system, figtree])",
                               "help": "Visualize trees graphically"},
             "distance": {"flag": "dis",
                          "nargs": "?",
@@ -1930,18 +2267,23 @@ pb_flags = {"collapse_polytomies": {"flag": "cpt",
                               "metavar": ("{'raxml', 'phyml', 'fasttree'}", "'program specific arguments'"),
                               "help": "Accept alignment file as input, and perform "
                                       "phylogenetic inference with a third party program"},
-            "list_ids": {"flag": "li",
-                         "action": "append",
-                         "nargs": "?",
-                         "type": int,
-                         "metavar": "Num columns",
-                         "help": "Display all taxa ids"},
             "hash_ids": {"flag": "hi",
                          "action": "append",
                          "nargs": "*",
                          "metavar": "args",
                          "help": "Rename all taxon label IDs (and optionally inner node lables) to fixed length hashes."
                                  " args: [hash length (int)] ['nodes']"},
+            "ladderize": {"flag": "ld",
+                          "action": "append",
+                          "nargs": "?",
+                          "metavar": "'rev'",
+                          "help": "Sort nodes by their number of children"},
+            "list_ids": {"flag": "li",
+                         "action": "append",
+                         "nargs": "?",
+                         "type": int,
+                         "metavar": "Num columns",
+                         "help": "Display all taxa ids"},
             "num_tips": {"flag": "nt",
                          "action": "store_true",
                          "help": "Display the number of tips in each tree"},
@@ -1997,6 +2339,10 @@ pb_modifiers = {"in_format": {"flag": "f",
                 "quiet": {"flag": "q",
                           "action": "store_true",
                           "help": "Suppress stderr messages"},
+                "random_seed": {"flag": "s",
+                                "action": "store",
+                                "type": int,
+                                "help": "Specify a random seed value"},
                 "test": {"flag": "t",
                          "action": "store_true",
                          "help": "Run the function and return any stderr/stdout other than trees"}}
@@ -2008,12 +2354,12 @@ db_flags = {"guess_database": {"flag": "gd",
             "live_shell": {"flag": "ls",
                            "action": "store_true",
                            "help": "Interactive database searching. The best tool for sequence discovery."},
-            # "retrieve_accessions": {"flag": "ra",
-            #                        "action": "store_true",
-            #                        "help": "Use search terms to find a list of sequence accession numbers"},
-            # "retrieve_sequences": {"flag": "rs",
-            #                       "action": "store_true",
-            #                       "help": "Get sequences for every included accession"}
+            "retrieve_accessions": {"flag": "ra",
+                                    "action": "store_true",
+                                    "help": "Use search terms to find a list of sequence accession numbers"},
+            "retrieve_sequences": {"flag": "rs",
+                                   "action": "store_true",
+                                   "help": "Get sequences for every included accession"}
             }
 
 db_modifiers = {"database": {"flag": "d",
@@ -2022,6 +2368,7 @@ db_modifiers = {"database": {"flag": "d",
                              "help": "Specify a specific database or database class to search"},
                 "out_format": {"flag": "o",
                                "action": "store",
+                               "choices": [],  # This needs to be set to FORMATS in the main program
                                "help": "If you want a specific format output"},
                 # "quiet": {"flag": "q",
                 #          "action": "store_true",

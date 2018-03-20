@@ -63,6 +63,10 @@ def mock_raisetypeerror(*args, **kwargs):
     raise TypeError("Fake TypeError: %s, %s" % (args, kwargs))
 
 
+def mock_raisevalueerror(*args, **kwargs):
+    raise ValueError("Fake ValueError: %s, %s" % (args, kwargs))
+
+
 def mock_raiseruntimeerror(*args, **kwargs):
     raise RuntimeError("Fake RuntimeError: %s, %s" % (args, kwargs))
 
@@ -73,6 +77,7 @@ def mock_raisesystemexit(*args, **kwargs):
 
 def fmt(prog):
     return br.CustomHelpFormatter(prog)
+
 
 parser = argparse.ArgumentParser(prog="SeqBuddy", formatter_class=fmt, add_help=False, usage=argparse.SUPPRESS,
                                  description='''\
@@ -112,19 +117,22 @@ def test_argparse_init(capsys, monkeypatch, sb_resources, hf, sb_odd_resources):
     assert "GuessError: Could not determine format from sb_input file" in err
 
     monkeypatch.setattr(sys, "argv", ['SeqBuddy.py', sb_odd_resources["gibberish"], "-cmp", "-f", "phylip"])
-    with pytest.raises(ValueError) as err:
+    with pytest.raises(SystemExit):
         Sb.argparse_init()
-    assert "ValueError: First line should have two integers" in str(err)
+    out, err = capsys.readouterr()
+    assert "Error: Unable to process input file(s)\nFirst line should have two integers" in err
 
     monkeypatch.setattr(sys, "argv", ['SeqBuddy.py', sb_odd_resources["phylipss_cols"], "-cmp", "-f", "phylipss"])
-    with pytest.raises(br.PhylipError) as err:
+    with pytest.raises(SystemExit):
         Sb.argparse_init()
-    assert "PhylipError: Malformed Phylip --> Less sequence found than expected" in str(err)
+    out, err = capsys.readouterr()
+    assert "Malformed Phylip --> Less sequence found than expected" in err
 
     monkeypatch.setattr(sys, "argv", ['SeqBuddy.py', sb_resources.get_one("p py", "paths"), "-cmp", "-f", "foo"])
-    with pytest.raises(ValueError) as err:
+    with pytest.raises(SystemExit):
         Sb.argparse_init()
-    assert "Unknown format 'foo'" in str(err)
+    out, err = capsys.readouterr()
+    assert "Format type 'foo' is not recognized/supported" in err
 
     monkeypatch.setattr(sys, "argv", ['SeqBuddy.py', sb_resources.get_one("p f", "paths"), "--blast", "blastdb/path"])
     temp_in_args, seqbuddy = Sb.argparse_init()
@@ -143,6 +151,30 @@ def test_argparse_init(capsys, monkeypatch, sb_resources, hf, sb_odd_resources):
     monkeypatch.setattr(sys, "argv", ['SeqBuddy.py', sb_resources.get_one("p f", "paths"), "-gf"])
     temp_in_args, seqbuddy = Sb.argparse_init()
     assert temp_in_args.guess_format
+
+
+# ##################### '-amd', '--amend_metadata' ###################### ##
+def test_amend_metadata_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.amend_metadata = [["organism"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("p g"), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "43080bb647e47418c20b27a4799147bc"
+
+    test_in_args.amend_metadata = [["organism", "Mnemiopsis"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("p g"), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "0bb918283b5dc1e78173fb0fd1c9c355"
+
+    test_in_args.amend_metadata = [["organism", "Foo", "Mnemiopsis"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("p g"), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "b723be0a97ddb4f94ddb6e08f1121387"
+
+    test_in_args.amend_metadata = [["topology", "Foo"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("p g"), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert "Topology values are limited to ['', 'linear', 'circular']" in err
 
 
 # ##################### '-ano', '--annotate' ###################### ##
@@ -193,7 +225,7 @@ def test_back_translate_ui(capsys, sb_resources, hf):
     test_in_args.back_translate = [["human", "o"]]
     Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
     out, err = capsys.readouterr()
-    assert hf.string2hash(out) == "b6bcb4e5104cb202db0ec4c9fc2eaed2"
+    assert hf.string2hash(out) == "0899fb80a7c7cdd0abb3c839ff9c41b6"
 
     with pytest.raises(TypeError)as err:
         Sb.command_line_ui(test_in_args, sb_resources.get_one('d f'), pass_through=True)
@@ -405,6 +437,11 @@ def test_delete_records_ui(capsys, sb_resources, hf):
     assert hf.string2hash(out) == "b831e901d8b6b1ba52bad797bad92d14"
     assert hf.string2hash(err) == "553348fa37d9c67f4ce0c8c53b578481"
 
+    test_in_args.delete_records = ["full", "ML2"]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "64049b9afd347f4507e264847e5f0500"
+
     temp_file = br.TempFile()
     with open(temp_file.path, "w", encoding="utf-8") as ofile:
         ofile.write("α1\nα2")
@@ -413,6 +450,27 @@ def test_delete_records_ui(capsys, sb_resources, hf):
     out, err = capsys.readouterr()
     assert hf.string2hash(out) == "eca4f181dae3d7998464ff71e277128f"
     assert hf.string2hash(err) == "7e0929af515502484feb4b1b2c35eaba"
+
+
+# ######################  '-drf', '--delete_recs_with_feature' ###################### #
+def test_delete_recs_with_feature_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.delete_recs_with_feature = ["splice_.+"]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('d g'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "fc91bfaed2df6926983144637cf0ba0f"
+
+    test_in_args.delete_recs_with_feature = ["CDS", "splice_.+"]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('d g'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "54c53fc6317a6c0a88468cb6eca258ee"
+
+    temp_file = br.TempFile()
+    temp_file.write("CDS\nsplice_.+")
+    test_in_args.delete_recs_with_feature = [temp_file.path]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('d g'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "54c53fc6317a6c0a88468cb6eca258ee"
 
 
 # ######################  '-drp', '--delete_repeats' ###################### #
@@ -445,6 +503,20 @@ def test_delete_small_ui(capsys, sb_resources, hf):
     assert hf.string2hash(out) == "196adf08d4993c51050289e5167dacdf"
 
     
+# ######################  '-dt', '--delete_taxa' ###################### #
+def test_delete_taxa_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.delete_taxa = [["Lobata"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "129c253374dd6171620884c92bece557"
+
+    test_in_args.delete_taxa = [["leidyi"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "96d74ce4bba524b4847fb2363f51e112"
+
+
 # ######################  '-efs', '--extract_feature_sequences' ###################### #
 def test_extact_feature_sequences_ui(capsys, sb_resources, hf):
     test_in_args = deepcopy(in_args)
@@ -504,21 +576,60 @@ def test_find_cpg_ui(capsys, sb_resources, hf):
 # ######################  '-orf', '--find_orfs' ###################### #
 def test_find_orfs_ui(capsys, sb_resources, hf, monkeypatch):
     test_in_args = deepcopy(in_args)
-    test_in_args.find_orfs = True
+    test_in_args.find_orfs = [[]]
     Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
     out, err = capsys.readouterr()
-    assert hf.string2hash("%s\n%s" % (err, out)) == "1f29f572c06d4f9c69930053a6113a8d"
+    assert hf.string2hash("%s\n%s" % (err, out)) == "e146d666d326380490736f4e855c015a"
+
+    test_in_args.find_orfs = [['500']]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash("%s\n%s" % (err, out)) == "fba8ba5083914b8ee518924f6e4881c8"
+
+    test_in_args.find_orfs = [['FalSe']]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash("%s\n%s" % (err, out)) == "67aa0c315f53b08c0ffd804382f9db90"
+
+    test_in_args.find_orfs = [['TRUE', '500']]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash("%s\n%s" % (err, out)) == "fba8ba5083914b8ee518924f6e4881c8"
+
+    test_in_args.find_orfs = [['Foo', '500']]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash("%s\n%s" % (err, out)) == "fba8ba5083914b8ee518924f6e4881c8"
+
+    test_in_args.find_orfs = [['false', '500']]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash("%s\n%s" % (err, out)) == "67aa0c315f53b08c0ffd804382f9db90"
+
+    test_in_args.find_orfs = [['500', 'FALSE']]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash("%s\n%s" % (err, out)) == "67aa0c315f53b08c0ffd804382f9db90"
+
+    test_in_args.find_orfs = [['200', 'false', 'TRUE', '500']]  # This should work out to False and 500
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash("%s\n%s" % (err, out)) == "67aa0c315f53b08c0ffd804382f9db90"
 
     tester = sb_resources.get_one("d g")
     tester = Sb.extract_regions(tester, "30:50")
+    test_in_args.find_orfs = [[]]
     Sb.command_line_ui(test_in_args, tester, True)
     out, err = capsys.readouterr()
-    assert hf.string2hash("%s\n%s" % (err, out)) == "54876473b1c31c7fe16e4aa8d4c847c2"
+    assert hf.string2hash("%s\n%s" % (err, out)) == "ba9d8ada8de3f8773c62b04c441284e5"
 
     monkeypatch.setattr(Sb, "find_orfs", mock_raisetypeerror)
-    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
-    out, err = capsys.readouterr()
-    assert "TypeError" in err
+    with pytest.raises(TypeError):
+        Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+
+    monkeypatch.setattr(Sb, "find_orfs", mock_raisevalueerror)
+    with pytest.raises(ValueError):
+        Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
 
 
 # ######################  '-fp', '--find_pattern' ###################### #
@@ -529,14 +640,14 @@ def test_find_pattern_ui(capsys, sb_resources, hf):
     out, err = capsys.readouterr()
 
     assert hf.string2hash(out) == "a13217987f5dd23f6fab71eb733271ff"
-    assert hf.string2hash(err) == "59fbef542d89ac72741c4d0df73d5f5a"
+    assert hf.string2hash(err) == "db13c9e5c65e8df5569bce2e20f32710"
 
     test_in_args.find_pattern = ["ATGGN{6}", "ambig"]
     Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
     out, err = capsys.readouterr()
 
     assert hf.string2hash(out) == "22b29f5d3aa45d7a2c7c5f3fdff2e210"
-    assert hf.string2hash(err) == "f54ddf323e0d8fecb2ef52084d048531"
+    assert hf.string2hash(err) == "97b8dee760241008a4e17e136d8d1b27"
 
 
 # ######################  '-frp', '--find_repeats' ###################### #
@@ -571,17 +682,47 @@ def test_find_repeats_ui(capsys, sb_resources, sb_odd_resources, hf):
 
 
 # ######################  '-frs', '--find_restriction_sites' ###################### #
-def test_find_restriction_sites_ui(capsys, sb_resources, hf):
+def test_find_restriction_sites_ui(capsys, sb_resources):
     test_in_args = deepcopy(in_args)
     test_in_args.find_restriction_sites = [["MaeI", "BseRI", "BccI", "MboII", 3, 4, 2, 5, "alpha"]]
     Sb.command_line_ui(test_in_args, sb_resources.get_one('d f'), True)
     out, err = capsys.readouterr()
-    assert hf.string2hash(out) == "793f1dce2c4b1c94ab1051f2e34ea0a4", print(out)
-    assert hf.string2hash(err) == "a240a6db9dfc1f2257faa80bc4b1445b"
 
+    assert """BccI            80..84
+     BccI            937..941
+     MaeI            74..77
+     MaeI            481..484
+     MaeI            652..655""" in out
+    assert """Mle-Panxα2
+BccI	377, 683, 823
+BseRI	581, 1243
+MaeI	713, 1181""" in err
+
+    # Test protein sequence provided instead of nucleotide
     with pytest.raises(TypeError) as err:
         Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), pass_through=True)
     assert "Unable to identify restriction sites in protein sequences." in str(err)
+
+    # Test topology set as linear
+    test_in_args = deepcopy(in_args)
+    test_in_args.find_restriction_sites = [["LpnPI", "lin"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('d f'), True)
+    out, err = capsys.readouterr()
+    assert """FEATURES             Location/Qualifiers
+     LpnPI           66..69
+     LpnPI           103..106
+     LpnPI           146..149""" in out
+
+    # Test topology set as circular
+    test_in_args = deepcopy(in_args)
+    test_in_args.find_restriction_sites = [["LpnPI", "circ"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('d f'), True)
+    out, err = capsys.readouterr()
+    assert """FEATURES             Location/Qualifiers
+     LpnPI           1227..1230
+     LpnPI           66..69
+     LpnPI           103..106
+     LpnPI           146..149""" in out
 
 
 # ######################  '-gbp', '--group_by_prefix' ###################### #
@@ -684,7 +825,7 @@ def test_guess_format_ui(capsys, sb_resources, sb_odd_resources, hf, monkeypatch
     test_in_args.sequence += [sb_odd_resources["gibberish"], sb_odd_resources["figtree"]]
     Sb.command_line_ui(test_in_args, sb_resources.get_one('d f'), True)
     out, err = capsys.readouterr()
-    assert hf.string2hash(out) == "94082594e3c0aafbcafcd3fd501497ac", print(out)
+    assert hf.string2hash(out) == "c1b601d684cd063bd29035cf84090505", print(out)
 
     text_io = io.open(sb_resources.get_one("d e", mode='paths'), "r")
     test_in_args.sequence = [text_io]
@@ -698,17 +839,17 @@ def test_guess_format_ui(capsys, sb_resources, sb_odd_resources, hf, monkeypatch
     out, err = capsys.readouterr()
     assert out == "PIPE\t-->\tUnknown\n"
 
-    monkeypatch.setattr(Sb, "_guess_format", mock_raisekeyerror)
+    monkeypatch.setattr(br, "guess_format", mock_raisekeyerror)
     test_in_args.sequence = [sb_resources.get_one("p g", mode='paths')]
     Sb.command_line_ui(test_in_args, sb_resources.get_one('d f'), True)
     out, err = capsys.readouterr()
     assert hf.string2hash(out) == "9fcc608d3800fed92030801b5bfd156e", print(out)
 
 
-# ######################  '-hsi', '--hash_seq_ids' ###################### #
-def test_hash_seq_ids_ui(capsys, sb_resources):
+# ######################  '-hi', '--hash_ids' ###################### #
+def test_hash_ids_ui(capsys, sb_resources):
     test_in_args = deepcopy(in_args)
-    test_in_args.hash_seq_ids = [None]
+    test_in_args.hash_ids = [None]
     tester = sb_resources.get_one('d f')
     ids = [rec.id for rec in tester.records]
     Sb.command_line_ui(test_in_args, tester, True)
@@ -716,13 +857,13 @@ def test_hash_seq_ids_ui(capsys, sb_resources):
         assert rec.id != ids[indx]
         assert ids[indx] == tester.hash_map[rec.id]
 
-    test_in_args.hash_seq_ids = [0]
+    test_in_args.hash_ids = [0]
     Sb.command_line_ui(test_in_args, tester, True)
     out, err = capsys.readouterr()
     assert "Warning: The hash_length parameter was passed in with the value 0. This is not a positive integer" in err
 
     tester.records *= 10
-    test_in_args.hash_seq_ids = [1]
+    test_in_args.hash_ids = [1]
     Sb.command_line_ui(test_in_args, tester, True)
     out, err = capsys.readouterr()
     assert "cover all sequences, so it has been increased to 2" in err
@@ -754,6 +895,33 @@ def test_insert_seqs_ui(capsys, sb_resources, hf):
     assert hf.string2hash(out) == "345836c75922e5e2a7367c7f7748b591"
 
 
+# ######################  '-isd', '--in_silico_digest' ###################### #
+def test_in_silico_digest_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.in_silico_digest = [[]]
+
+    # Test no enzymes provided
+    tester = Sb.SeqBuddy(sb_resources.get_one('d g').records[:2])
+    Sb.command_line_ui(test_in_args, tester, True)
+    out, err = capsys.readouterr()
+    assert err == "Error: Please provide a list of enzymes you wish to cut your sequences with.\n"
+
+    # Test unknown enzymes
+    tester = sb_resources.get_one('d g')
+    tester.records = [rec for rec in tester.records if rec.name == "Mle-Panxα9"]
+    test_in_args.in_silico_digest = [["MwoI", "FooBR"]]
+    Sb.command_line_ui(test_in_args, tester, True)
+    out, err = capsys.readouterr()
+
+    assert hf.string2hash(out) == "6eaac258437ba5c8343a07b5bc6b6db5"
+    assert err == "Warning: FooBR not a known enzyme\nWarning: FooBR not a known enzyme\n"
+
+    # Test protein sequence instead of nucleotide
+    with pytest.raises(TypeError) as err:
+        Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), pass_through=True)
+    assert "Unable to identify restriction sites in protein sequences." in str(err)
+
+
 # ######################  '-ip', '--isoelectric_point' ###################### #
 def test_isoelectric_point_ui(capsys, sb_resources, hf):
     test_in_args = deepcopy(in_args)
@@ -767,6 +935,20 @@ def test_isoelectric_point_ui(capsys, sb_resources, hf):
     out, err = capsys.readouterr()
     assert hf.string2hash(out) == "d1ba12963ee508bc64b64f63464bfb4a"
     assert err == "ID\tpI\n"
+
+
+# ######################  '-kt', '--keep_taxa' ###################### #
+def test_keep_taxa_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.keep_taxa = [["Lobata"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "9d82eb23e33fd015e934a06265fbf25f"
+
+    test_in_args.keep_taxa = [["leidyi"]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "5c97a37b42e189b5155e45ee78974822"
 
 
 # ######################  '-li', '--list_ids' ###################### #
@@ -914,6 +1096,22 @@ def test_map_features_prot2nucl_ui(capsys, sb_resources, sb_odd_resources, hf):
     assert "You must provide one DNA file and one protein file" in str(err)
 
 
+# #####################  '-max', '--max_recs' ###################### ##
+def test_max_recs_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.max_recs = [False]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p f'), True)
+
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "79e2eded9fb788df40bf4254392ace44"
+
+    test_in_args.max_recs = [3]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p f'), True)
+
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "e68accb5daed2459693d7872d2291b9f"
+
+
 # ######################  '-mg', '--merge' ###################### #
 def test_merge_ui(capsys, sb_resources, sb_odd_resources, hf):
     test_in_args = deepcopy(in_args)
@@ -927,6 +1125,22 @@ def test_merge_ui(capsys, sb_resources, sb_odd_resources, hf):
         test_in_args.sequence = [sb_resources.get_one("p g", mode='paths'), sb_resources.get_one("d g", mode='paths')]
         Sb.command_line_ui(test_in_args, Sb.SeqBuddy, pass_through=True)
     assert "Sequence mismatch for record 'Mle-Panxα9'" in str(err)
+
+
+# #####################  '-min', '--min_recs' ###################### ##
+def test_min_recs_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.min_recs = [False]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p f'), True)
+
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "e40fe7ee465f49cda27f86dbdd479f26"
+
+    test_in_args.min_recs = [3]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p f'), True)
+
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "c0f472512cfa64f6c64d5daa6591101f", print(out)
 
 
 # ######################  '-mw', '--molecular_weight' ###################### #
@@ -1017,6 +1231,69 @@ def test_order_ids_randomly_ui(capsys, sb_resources, hf):
     assert hf.buddy2hash(tester) == hf.buddy2hash(Sb.order_ids(sb_resources.get_one('d f')))
 
 
+# ######################  '-obl', '--order_recs_by_len' ###################### #
+def test_order_recs_by_len_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.order_recs_by_len = [[]]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p f'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "bb114c02bfda1d1ad90bfb3375dc3a3b", print(out)
+
+    test_in_args.order_recs_by_len = ["rev"]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p f'), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "e99cf3d600d725e6dbd0cd5a3800face", print(out)
+
+
+# ####################  '-ppo', '--prepend_organism' ##################### #
+def test_prepend_organism_ui(capsys, sb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.prepend_organism = [None]
+    tester = sb_resources.get_one("p g")
+    tester.records[4].annotations["organism"] = "Testus robustis"
+    tester.out_format = "fasta"
+    Sb.command_line_ui(test_in_args, tester, True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "12af6bc1c299f3aa1034825ceacb51a3"
+    assert err == """\
+# ######################## Prefix Mapping ######################## #
+Mlei: Mnemiopsis leidyi
+Trob: Testus robustis
+# ################################################################ #
+
+"""
+
+    Sb.command_line_ui(test_in_args, sb_resources.get_one("d g"), True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "d59573f741e3620503f70cc782faf9b6"
+    assert err == """\
+# ######################## Prefix Mapping ###################### #
+# No organism information was identified in the supplied records #
+# ############################################################## #
+
+"""
+
+    test_in_args.prepend_organism = [0]
+    with pytest.raises(ValueError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert str(err.value) == "Prefix length must be > 2"
+
+    test_in_args.prepend_organism = [5]
+    tester = sb_resources.get_one("p g")
+    tester.records[4].annotations["organism"] = "Testus robustis"
+    tester.out_format = "fasta"
+    Sb.command_line_ui(test_in_args, tester, True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "f671a53b36ce36b06837b8a1d8039625"
+    assert err == """\
+# ######################## Prefix Mapping ######################## #
+Mleid: Mnemiopsis leidyi
+Trobu: Testus robustis
+# ################################################################ #
+
+"""
+
+
 # ######################  '-psc', '--prosite_scan' ###################### #
 def test_prosite_scan_ui(capsys, sb_resources, hf, monkeypatch):
     monkeypatch.setattr(Sb.PrositeScan, "run", lambda _: sb_resources.get_one("p g"))
@@ -1026,7 +1303,7 @@ def test_prosite_scan_ui(capsys, sb_resources, hf, monkeypatch):
 
     Sb.command_line_ui(test_in_args, seqbuddy, True)
     out, err = capsys.readouterr()
-    assert hf.string2hash(out) == "7a8e25892dada7eb45e48852cbb6b63d"
+    assert hf.string2hash(out) == "0a8462e72f64fcd22544bb153b51b2b6"
 
     test_in_args.out_format = "fasta"
     Sb.command_line_ui(test_in_args, seqbuddy, True)
@@ -1096,12 +1373,16 @@ def test_pull_records_ui(capsys, sb_resources, hf):
     assert hf.string2hash(out) == "cd0c1b1406559c1bc2eea1acd1928c3d"
 
     temp_file = br.TempFile()
-    with open(temp_file.path, "w", encoding="utf-8") as ofile:
-        ofile.write("α1\nα2")
+    temp_file.write("α1\n\nα2\n")
     test_in_args.pull_records = [temp_file.path]
     Sb.command_line_ui(test_in_args, sb_resources.get_one('d f'), True)
     out, err = capsys.readouterr()
     assert hf.string2hash(out) == "cd8d7284f039233e090c16e8aa6b5035"
+
+    temp_file.clear()
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('d f'), True)
+    out, err = capsys.readouterr()
+    assert out == "Error: No sequences in object.\n"
 
 
 # ######################  '-prf', '--pull_records_with_feature' ###################### #
@@ -1297,6 +1578,138 @@ def test_shuffle_seqs_ui(capsys, sb_resources, hf):
     assert hf.string2hash(out) != "b831e901d8b6b1ba52bad797bad92d14"
 
 
+# ######################  '-sxf', '--split_by_x_files' ###################### #
+def test_split_by_x_files(capsys, sb_resources):
+    tester = Sb.SeqBuddy(sb_resources.get_one('d f'))
+    test_in_args = deepcopy(in_args)
+    os.chdir(TEMP_DIR.path)
+    os.makedirs('sxf_output_files')
+    os.chdir('sxf_output_files')
+    file_name_list = []
+    for idx in range(3):
+        file_name = 'split_seq_' + str(idx) + ".fa"
+        file_name_list.append(file_name)
+
+    # Test when no directory is given
+    test_in_args.split_by_x_files = [[3]]
+    Sb.command_line_ui(test_in_args, tester, skip_exit=True)
+    for root, dirs, files in (os.walk('../sxf_output_files')):
+        for file in files:
+            assert file in file_name_list
+
+    # Test when a directory is given
+    os.makedirs('sxf_test_dir_1')
+    test_in_args.split_by_x_files = [[3, 'sxf_test_dir_1']]
+    Sb.command_line_ui(test_in_args, tester, skip_exit=True)
+    for root, dirs, files in (os.walk('sxf_test_dir_1')):
+        for file in files:
+            assert file in file_name_list
+
+    # Test when more than two arguments are given
+    test_in_args.split_by_x_files = [[5, 12, 4]]
+    with pytest.raises(AttributeError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert "Please provide one or two arguments" in str(err)
+
+    # Test when two arguments are given, but both are integers
+    test_in_args.split_by_x_files = [[5, 12]]
+    with pytest.raises(AttributeError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert "Please provide only one number of files" in str(err)
+
+    # Test when the given directory does not exist
+    test_in_args.split_by_x_files = [[7, 'doobedoobedoo']]
+    with pytest.raises(AttributeError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert "doobedoobedoo is not an existing directory." in str(err)
+
+    # Test when the number of files is not valid
+    test_in_args.split_by_x_files = [[-2, 'sxf_test_dir_1']]
+    with pytest.raises(AttributeError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert "Please provide a valid number of output files." in str(err)
+
+    # Test using the input file name to create output file names
+    test_in_args.sequence[0] = 'Sequence_name.fa'
+    open('Sequence_name.fa', 'w').close()
+    file_name_list = []
+    for idx in range(3):
+        file_name = 'Sequence_name_' + str(idx) + ".fa"
+        file_name_list.append(file_name)
+    os.makedirs('sxf_test_dir_2')
+    test_in_args.split_by_x_files = [[3, 'sxf_test_dir_2']]
+    Sb.command_line_ui(test_in_args, tester, skip_exit=True)
+    for root, dirs, files in (os.walk('sxf_test_dir_2')):
+        for file in files:
+            assert file in file_name_list
+
+
+# ######################  '-sxs', '--split_by_x_seqs' ###################### #
+def test_split_by_x_seqs(capsys, sb_resources):
+    tester = Sb.SeqBuddy(sb_resources.get_one('d f'))
+    test_in_args = deepcopy(in_args)
+    os.chdir(TEMP_DIR.path)
+    os.makedirs('sxs_output_files')
+    os.chdir('sxs_output_files')
+    file_name_list = []
+    for idx in range(3):
+        file_name = 'split_seq_' + str(idx) + ".fa"
+        file_name_list.append(file_name)
+
+    # Test when no directory is given
+    test_in_args.split_by_x_seqs = [[5]]
+    Sb.command_line_ui(test_in_args, tester, skip_exit=True)
+    for root, dirs, files in (os.walk('../sxs_output_files')):
+        for file in files:
+            assert file in file_name_list
+
+    # Test when a directory is given
+    os.makedirs('sxs_test_dir_1')
+    test_in_args.split_by_x_seqs = [[5, 'sxs_test_dir_1']]
+    Sb.command_line_ui(test_in_args, tester, skip_exit=True)
+    for root, dirs, files in (os.walk('sxs_test_dir_1')):
+        for file in files:
+            assert file in file_name_list
+
+    # Test when more than two arguments are given
+    test_in_args.split_by_x_seqs = [[5, 12, 4]]
+    with pytest.raises(AttributeError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert "Please provide one or two arguments" in str(err)
+
+    # Test when two arguments are given, but both are integers
+    test_in_args.split_by_x_seqs = [[5, 12]]
+    with pytest.raises(AttributeError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert "Please provide only one number of sequences" in str(err)
+
+    # Test when the given directory does not exist
+    test_in_args.split_by_x_seqs = [[7, 'doobedoobedoo']]
+    with pytest.raises(AttributeError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert "doobedoobedoo is not an existing directory." in str(err)
+
+    # Test when the number of files is not valid
+    test_in_args.split_by_x_seqs = [[-2, 'sxs_test_dir_1']]
+    with pytest.raises(AttributeError) as err:
+        Sb.command_line_ui(test_in_args, tester, pass_through=True)
+    assert "Please provide a valid number of sequences." in str(err)
+
+    # Test using the input file name to create output file names
+    test_in_args.sequence[0] = 'Sequence_name.fa'
+    open('Sequence_name.fa', 'w').close()
+    os.makedirs('sxs_test_dir_2')
+    file_name_list = []
+    for idx in range(3):
+        file_name = 'Sequence_name_' + str(idx) + ".fa"
+        file_name_list.append(file_name)
+    test_in_args.split_by_x_seqs = [[5, 'sxs_test_dir_2']]
+    Sb.command_line_ui(test_in_args, tester, skip_exit=True)
+    for root, dirs, files in (os.walk('sxs_test_dir_2')):
+        for file in files:
+            assert file in file_name_list
+
+
 # ######################  '-d2r', '--transcribe' ###################### #
 def test_transcribe_ui(capsys, sb_resources, hf):
     test_in_args = deepcopy(in_args)
@@ -1308,6 +1721,57 @@ def test_transcribe_ui(capsys, sb_resources, hf):
     with pytest.raises(TypeError) as err:
         Sb.command_line_ui(test_in_args, sb_resources.get_one('p f'), pass_through=True)
     assert "DNA sequence required, not IUPACProtein()." in str(err)
+
+
+# ######################  '-tb', '--taxonomic_breakdown' ###################### #
+def test_taxonomic_breakdown_ui(capsys, sb_resources):
+    test_in_args = deepcopy(in_args)
+    test_in_args.taxonomic_breakdown = [None]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
+    out, err = capsys.readouterr()
+    assert out == """\
+Total: 13
+
+Unknown    11
+Eukaryota    2
+ |Opisthokonta    2
+ | |Metazoa    2
+ | | |Eumetazoa    2
+ | | | |Ctenophora    2
+
+"""
+
+    test_in_args.taxonomic_breakdown = [-2]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
+    out, err = capsys.readouterr()
+    assert out == """\
+Total: 13
+
+Unknown    11
+Eukaryota    2
+ |Opisthokonta    2
+
+"""
+
+    test_in_args.taxonomic_breakdown = [0]
+    Sb.command_line_ui(test_in_args, sb_resources.get_one('p g'), True)
+    out, err = capsys.readouterr()
+    assert out == """\
+Total: 13
+
+Unknown    11
+Eukaryota    2
+ |Opisthokonta    2
+ | |Metazoa    2
+ | | |Eumetazoa    2
+ | | | |Ctenophora    2
+ | | | | |Tentaculata    2
+ | | | | | |Lobata    2
+ | | | | | | |Bolinopsidae    2
+ | | | | | | | |Mnemiopsis    2
+ | | | | | | | | |leidyi    2
+
+"""
 
 
 # ######################  '-tr', '--translate' ###################### #
@@ -1362,7 +1826,7 @@ def test_translate6frames_ui(capsys, sb_resources, sb_odd_resources, hf):
     tester.records[0].seq.alphabet = IUPAC.protein
     with pytest.raises(TypeError) as err:
         Sb.command_line_ui(test_in_args, tester, pass_through=True)
-    assert "Record 'Mle-Panxα12' is protein. Nucleic acid sequences required." in str(err)
+    assert "Record 'Mle-Panxα12_f1' is protein. Nucleic acid sequences required." in str(err)
 
     with pytest.raises(TypeError) as err:
         Sb.command_line_ui(test_in_args, sb_resources.get_one('p f'), pass_through=True)
@@ -1390,12 +1854,12 @@ def test_transmembrane_domains_ui(capsys, sb_resources, hf, monkeypatch):
 
     Sb.command_line_ui(test_in_args, seqbuddy, True)
     out, err = capsys.readouterr()
-    assert hf.string2hash(out) == "7a8e25892dada7eb45e48852cbb6b63d"
+    assert hf.string2hash(out) == "0a8462e72f64fcd22544bb153b51b2b6"
 
     test_in_args.transmembrane_domains = ["Some random job id"]
     Sb.command_line_ui(test_in_args, seqbuddy, True)
     out, err = capsys.readouterr()
-    assert hf.string2hash(out) == "7a8e25892dada7eb45e48852cbb6b63d"
+    assert hf.string2hash(out) == "0a8462e72f64fcd22544bb153b51b2b6"
 
     monkeypatch.setattr(Sb, "transmembrane_domains", lambda *_, **__: sb_resources.get_one("p f"))
     Sb.command_line_ui(test_in_args, seqbuddy, True)

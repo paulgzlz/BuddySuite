@@ -22,6 +22,7 @@ class CleanCommand(Command):
     def run():
         os.system('rm -vrf ./build ./dist ./*.pyc ./*.tgz ./*.egg-info')
 
+
 PACKAGES = [
     'buddysuite',
 ]
@@ -37,7 +38,7 @@ DEPENDENCIES = [
     'suds-py3',
     'biopython>=1.69',
     'dendropy',
-    'ete3',
+    'matplotlib',
 ]
 
 KEYWORDS = [
@@ -61,7 +62,7 @@ ENTRY_POINTS = {
 }
 
 setup(name='buddysuite',
-      version='1.2.7',
+      version='1.4.0',
       description='BuddySuite is a collection of command line utilities written in Python for '
                   'working with biological data.',
       long_description=open(os.path.join(os.path.dirname(__file__), 'README.rst'), encoding="utf-8").read(),
@@ -70,6 +71,7 @@ setup(name='buddysuite',
       author_email='steve.bond@gmail.com',
       url='https://github.com/biologyguy/BuddySuite',
       packages=PACKAGES,
+      package_data={'buddysuite': ['dependencies/*.js', 'README.md', 'LICENSE.txt', 'privacy']},
       setup_requires=['numpy'],
       install_requires=DEPENDENCIES,
       entry_points=ENTRY_POINTS,

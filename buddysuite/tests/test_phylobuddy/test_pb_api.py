@@ -8,12 +8,14 @@ import buddy_resources as br
 from .. import __init__
 
 from unittest import mock
-import ete3
 import os
+from os.path import join
 import shutil
 import re
+import webbrowser
+import pylab
 from collections import OrderedDict
-from ete3.coretype.tree import TreeError
+from dendropy import TreeList
 
 RES_PATH = __init__.RESOURCE_PATH
 HASH_MAP = OrderedDict([('mYSiElpW', 'Mle-Panxα9'), ('wPDsBSFF', 'Mle-Panxα7A'), ('eMBqjkZe', 'Mle-Panxα1'),
@@ -30,6 +32,47 @@ HASH_MAP = OrderedDict([('mYSiElpW', 'Mle-Panxα9'), ('wPDsBSFF', 'Mle-Panxα7A'
 
 
 # ###################### 'cpt', '--collapse_polytomies' ###################### #
+def test_add_branch(pb_odd_resources, hf):
+    # Single taxon on a single sister taxon
+    tester = Pb.PhyloBuddy(pb_odd_resources['lengths'])
+    tester = Pb.add_branch(tester, "Foo", "Mle-Panxα8")
+    assert hf.buddy2hash(tester) == "b83c4cfb07bd5df9f4bc41a7f9ebe718", print(tester)
+
+    # Single taxon on multiple sister taxa
+    tester = Pb.PhyloBuddy(pb_odd_resources['lengths'])
+    tester = Pb.add_branch(tester, "Foo", ["Mle-Panxα2", "Mle-Panxα5"])
+    assert hf.buddy2hash(tester) == "b74b7af2e3ebc3af1d49bfd508475c63", print(tester)
+
+    # Subtree on a single sister taxon
+    tester = Pb.PhyloBuddy(pb_odd_resources['lengths'])
+    tester = Pb.add_branch(tester, Pb.PhyloBuddy("((Foo:0.78,Bar:0.34):1.1,Baz:0.2);"), "Mle-Panxα8")
+    assert hf.buddy2hash(tester) == "1319f48d46800d28179655a2125fd2c3", print(tester)
+
+    # Subtree on multiple sister taxa
+    tester = Pb.PhyloBuddy(pb_odd_resources['lengths'])
+    trees = TreeList()
+    trees.read(data="((Foo:0.78,Bar:0.34):1.1,Baz:0.2);", schema="newick")
+    tester = Pb.add_branch(tester, trees.pop(), ["Mle-Panxα2", "Mle-Panxα5"])
+    assert hf.buddy2hash(tester) == "828a289b16f3a818230f54a0d4aa8c5d", print(tester)
+
+    # Subtree on multiple sister taxa at root of tree
+    tester = Pb.PhyloBuddy(pb_odd_resources['lengths'])
+    trees = TreeList()
+    trees.read(data="((Foo:0.78,Bar:0.34):1.1,Baz:0.2);", schema="newick")
+    tester = Pb.add_branch(tester, trees.pop(), ["Mle-Panxα2", "Mle-Panxα9"])
+    assert hf.buddy2hash(tester) == "4e8c323a5104154bc8be844742bca000", print(tester)
+
+    # Error handling
+    with pytest.raises(TypeError) as err:
+        Pb.add_branch(tester, 123456, "Mle-Panxα8")
+    assert "new_branch parameter must be a string, dentropy tree, or PhyloBuddy object." in str(err)
+
+    with pytest.raises(AttributeError) as err:
+        Pb.add_branch(tester, "Foo", "Mle-PanxαFoo")
+    assert "Unable to identify any sister taxa in tree." in str(err)
+
+
+# ###################### 'cpt', '--collapse_polytomies' ###################### #
 def test_collapse_polytomies(pb_odd_resources, hf):
     tester = Pb.PhyloBuddy(pb_odd_resources['support'])
     tester = Pb.collapse_polytomies(tester, 20)
@@ -43,6 +86,7 @@ def test_collapse_polytomies(pb_odd_resources, hf):
         Pb.collapse_polytomies(tester, threshold=0.1, mode='foo')
         assert "Mode must be 'support' or 'length'" in str(err)
 
+
 # ###################### 'ct', '--consensus_tree' ###################### #
 hashes = [('m k', 'acd3fb34cce867c37684244701f9f5bf'), ('m n', 'eede64c804e531cb1c99e4240589b04b'),
           ('m l', '73ac98a1656d1c4a52da16d3f096f8ce'), ('o k', '64f7df66253b104c300d13e344e2f216')]
@@ -52,7 +96,8 @@ hashes = [('m k', 'acd3fb34cce867c37684244701f9f5bf'), ('m n', 'eede64c804e531cb
 def test_consensus_tree(key, next_hash, pb_resources, hf):
     tester = pb_resources.get_one(key)
     tester = Pb.consensus_tree(tester)
-    assert hf.buddy2hash(tester) == next_hash, tester.write("error_files%s%s" % (next_hash, os.path.sep))
+    assert hf.buddy2hash(tester) == next_hash, tester.write(join("error_files", next_hash))
+
 
 hashes = [('m k', 'baf9b2def2c0fa2ff97d3a16d24b4738'), ('m n', '3ab21ed1202222f17a44fff7b4051aa0'),
           ('m l', 'd680eece99ad907bbc8cd69ceaeb7b8a'), ('o k', '64f7df66253b104c300d13e344e2f216')]
@@ -66,20 +111,128 @@ def test_consensus_tree_95(key, next_hash, pb_resources, hf):
 
 
 # ###################### 'dt', '--display_trees' ###################### #
-def test_display_trees(monkeypatch, pb_resources):
-    show = mock.Mock(return_value=True)
-    monkeypatch.setattr(ete3.TreeNode, "show", show)
-    try:
-        assert Pb.display_trees(pb_resources.get_one("o k"))
-    except SystemError as err:
-        assert "This system does not appear to be graphical, so display_trees() will not work." in str(err)
+def test_display_trees(monkeypatch, pb_resources, capsys):
+    monkeypatch.setattr(webbrowser, "open", lambda *_, **__: "")
+    monkeypatch.setattr(Pb.Bio.Phylo, "draw", lambda *_, **__: True)
+    monkeypatch.setattr(pylab, "axis", lambda *_: True)
+    monkeypatch.setattr(pylab, "savefig", lambda *_, **__: True)
+    monkeypatch.setattr("builtins.input", lambda *_: print("Mock input"))
+    monkeypatch.setattr(Pb, "Popen", lambda *_, **__: True)
+
+    with mock.patch.dict('os.environ'):
+        os.environ["DISPLAY"] = ":0"
+        phylobuddy = pb_resources.get_one("o k")
+        tree = phylobuddy.trees[0]
+        for node in tree:
+            if node.taxon:
+                node.annotations['!color'] = '#ff0000'
+        assert Pb.display_trees(phylobuddy) is True
+        out, err = capsys.readouterr()
+        assert "Mock input" in out
+
+        monkeypatch.setattr(Pb, "Popen", lambda *_, **__: True)
+        monkeypatch.setattr(shutil, "which", lambda *_: True)
+        assert Pb.display_trees(pb_resources.get_one("o k"), program="figtree") is True
+        out, err = capsys.readouterr()
+        assert "Mock input" in out
+
+        monkeypatch.setattr(os, "name", "nt")
+        assert Pb.display_trees(pb_resources.get_one("o k"), program="figtree") is False
+        out, err = capsys.readouterr()
+        assert "Sorry! I'm not sure how to launch FigTree on Windows" in out
 
 
-def test_display_trees_error(pb_resources):
+def test_display_trees_pylab_setup(monkeypatch, pb_resources, capsys):
+    def mock_raise_runtime1():
+        raise RuntimeError("The Mac OS X backend will not be able to function correctly")
+
+    tmp_dir = br.TempDir()
+    mplibrc = os.path.join(tmp_dir.path, ".matplotlib", "matplotlibrc")
+
+    def mock_expand_user(path):
+        return re.sub("~", tmp_dir.path, path)
+
+    monkeypatch.setattr(br, "dummy_func", mock_raise_runtime1)
+    monkeypatch.setattr("builtins.input", lambda *_: print("Mock input"))
+    monkeypatch.setattr(os.path, "expanduser", mock_expand_user)
+    monkeypatch.setattr(br, "ask", lambda *_, **__: True)
+
+    # First time this runs, matplotlibrc is not present in temp dir
+    with mock.patch.dict('os.environ'):
+        os.environ["DISPLAY"] = ":0"
+        with pytest.raises(SystemExit):
+            Pb.display_trees(pb_resources.get_one("o k"))
+
+    out, err = capsys.readouterr()
+    assert "%s amended.\nPlease re-run your command." % mplibrc in err
+    assert os.path.isfile(mplibrc)
+    with open(mplibrc, "r") as ifile:
+        assert ifile.read() == "# Backend set by PhyloBuddy\nbackend: TkAgg\n"
+
+    # Second time this runs, matplotlibrc is now present in temp dir
+    with mock.patch.dict('os.environ'):
+        os.environ["DISPLAY"] = ":0"
+        with pytest.raises(SystemExit):
+            Pb.display_trees(pb_resources.get_one("o k"))
+
+    out, err = capsys.readouterr()
+    assert "%s amended.\nPlease re-run your command." % mplibrc in err
+    with open(mplibrc, "r") as ifile:
+        output = ifile.read()
+        assert output == ("# Backend set by PhyloBuddy\nbackend: TkAgg\n" * 2).strip(), print(output)
+
+    # Do not agree to update matplotlibrc
+    monkeypatch.setattr(br, "ask", lambda *_, **__: False)
+    with open(mplibrc, "w") as ofile:
+        ofile.write("Foo bar\n")
+
+    with mock.patch.dict('os.environ'):
+        os.environ["DISPLAY"] = ":0"
+        with pytest.raises(SystemExit):
+            Pb.display_trees(pb_resources.get_one("o k"))
+
+    out, err = capsys.readouterr()
+    assert "Stack Overflow may help you out" in err
+
+    with open(mplibrc, "r") as ifile:
+        assert ifile.read() == "Foo bar\n"
+
+    def mock_raise_runtime2():
+        raise RuntimeError("Unknown runtime error")
+
+    monkeypatch.setattr(br, "dummy_func", mock_raise_runtime2)
+    with mock.patch.dict('os.environ'):
+        os.environ["DISPLAY"] = ":0"
+        with pytest.raises(RuntimeError) as err:
+            Pb.display_trees(pb_resources.get_one("o k"))
+        assert "Unknown runtime error" in str(err)
+
+
+def test_display_trees_error(pb_resources, monkeypatch):
+    # Unknown program
+    with pytest.raises(AttributeError) as err:
+        Pb.display_trees("PhyloBuddy", program="foo")
+    assert "Unknown program 'foo' selected for display. Please select between ['figtree', 'system']" in str(err)
+
+    monkeypatch.setattr(shutil, "which", lambda *_: "")
+
+    with mock.patch.dict('os.environ'):
+        os.environ["DISPLAY"] = ":0"
+        with pytest.raises(SystemError) as err:
+            Pb.display_trees("PhyloBuddy", program="figtree")
+        assert "Unable to find FigTree on your system. Please install it and ensure it is present in" \
+               " your $PATH. http://tree.bio.ed.ac.uk/software/figtree/" in str(err)
+
     # noinspection PyUnresolvedReferences
+    monkeypatch.setattr("builtins.input", lambda *_: "")
+    monkeypatch.setattr(webbrowser, "open_new_tab", lambda *_: "")
+    monkeypatch.setattr(os, "name", "posix")
+    monkeypatch.setattr(Pb.sys, "platform", "blahh")
+
     with mock.patch.dict('os.environ'):
         if 'DISPLAY' in os.environ:
             del os.environ['DISPLAY']
+
         with pytest.raises(SystemError):
             Pb.display_trees(pb_resources.get_one("o k"))
 
@@ -95,6 +248,7 @@ def test_distance_wrf(key, next_hash, pb_resources, hf):
     output = str(Pb.distance(tester, method='wrf'))
     assert hf.string2hash(output) == next_hash
 
+
 hashes = [('m k', '49173bc33d89cc3d912a6af0fd51801d'), ('m n', '56574d4305bb5f094363a0fad351fd42'),
           ('m l', '49173bc33d89cc3d912a6af0fd51801d')]
 
@@ -104,6 +258,7 @@ def test_distance_uwrf(key, next_hash, pb_resources, hf):
     tester = pb_resources.get_one(key)
     output = str(Pb.distance(tester, method='uwrf'))
     assert hf.string2hash(output) == next_hash, print(output)
+
 
 hashes = [('m k', 'bae2c660250d42d6ba9bac7d311d6ffb'), ('m n', '0596ee4e2d4e76b27fe20b66a8fbea51'),
           ('m l', 'bae2c660250d42d6ba9bac7d311d6ffb')]
@@ -145,16 +300,16 @@ class MockPopen(object):
 
 def mock_check_output(*args, **kwargs):
     print([args, kwargs])
-    with open("{0}mock_resources{1}test_fasttree_inputs{1}result.tre".format(RES_PATH, os.path.sep), "r") as ifile:
+    with open(join(RES_PATH, "mock_resources", "test_fasttree_inputs", "result.tre"), "r") as ifile:
         return ifile.read()
 
 
 def test_raxml(alb_resources, hf, monkeypatch):
     mock_tmp_dir = br.TempDir()
     tmp_dir = br.TempDir()
-    root, dirs, files = next(os.walk("%smock_resources%stest_raxml_inputs" % (RES_PATH, os.path.sep)))
+    root, dirs, files = next(os.walk(join(RES_PATH, "mock_resources", "test_raxml_inputs")))
     for _file in files:
-        shutil.copyfile("%s%s%s" % (root, os.path.sep, _file), "%s%s%s" % (mock_tmp_dir.path, os.path.sep, _file))
+        shutil.copyfile(join(root, _file), join(mock_tmp_dir.path, _file))
     monkeypatch.setattr(Pb.shutil, "which", lambda *_: True)
     monkeypatch.setattr(Pb, "Popen", MockPopen)
     monkeypatch.setattr(br, "TempDir", lambda: mock_tmp_dir)
@@ -163,40 +318,40 @@ def test_raxml(alb_resources, hf, monkeypatch):
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'raxml')
-    assert hf.buddy2hash(tester) == "1cede6c576bb88125e2387d850f813ab"
+    assert hf.buddy2hash(tester) == "1cede6c576bb88125e2387d850f813ab", tester.write("temp.del")
 
     # quiet
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'raxml', quiet=True)
-    assert hf.buddy2hash(tester) == "1cede6c576bb88125e2387d850f813ab"
+    assert hf.buddy2hash(tester) == "1cede6c576bb88125e2387d850f813ab", tester.write("temp.del")
 
     # params
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
-    tester = Pb.generate_tree(tester, 'raxml', "-w path{0}to{0}nowhere".format(os.path.sep), quiet=True)
-    assert hf.buddy2hash(tester) == "1cede6c576bb88125e2387d850f813ab"
+    tester = Pb.generate_tree(tester, 'raxml', "-w %s" % join("path", "to", "nowhere"), quiet=True)
+    assert hf.buddy2hash(tester) == "1cede6c576bb88125e2387d850f813ab", tester.write("temp.del")
 
     # slight edges
     tester = alb_resources.get_one("o p n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'raxml-HPC', tmp_dir.path, quiet=True)
-    assert hf.buddy2hash(tester) == "1cede6c576bb88125e2387d850f813ab"
+    assert hf.buddy2hash(tester) == "1cede6c576bb88125e2387d850f813ab", tester.write("temp.del")
 
     # bootstraps
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'raxml', "-b 1234 -N 4", quiet=True)
-    assert hf.buddy2hash(tester) == "b8a3b6068aa06bd8a70fcc9bda0efad9"
+    assert hf.buddy2hash(tester) == "b8a3b6068aa06bd8a70fcc9bda0efad9", tester.write("temp.del")
 
     # keep
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
-    Pb.generate_tree(tester, 'raxml', keep_temp="%s%skeep_files" % (tmp_dir.path, os.path.sep))
-    root, dirs, files = next(os.walk("%s%skeep_files" % (tmp_dir.path, os.path.sep)))
+    Pb.generate_tree(tester, 'raxml', keep_temp=join(tmp_dir.path, "keep_files"))
+    root, dirs, files = next(os.walk(join(tmp_dir.path, "keep_files")))
     kept_output = ""
     for file in sorted(files):
-        with open("%s%s%s" % (root, os.path.sep, file), "r") as ifile:
+        with open(join(root, file), "r") as ifile:
             kept_output += ifile.read()
     if os.name == "nt":
         assert hf.string2hash(kept_output) == "7f2fdfe55dbe805bd994f3f56c79bb1b"
@@ -204,16 +359,15 @@ def test_raxml(alb_resources, hf, monkeypatch):
         assert hf.string2hash(kept_output) == "393353fb47861460aecaefa69a6ec55c"
 
     # multi-run
-    os.remove("%s%sRAxML_bestTree.result" % (mock_tmp_dir.path, os.path.sep))
+    os.remove(join(mock_tmp_dir.path, "RAxML_bestTree.result"))
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'raxml', "-N 3", quiet=True)
-    assert hf.buddy2hash(tester) == "e8ce19bba744f0188df2ebb4ffced4d8"
+    assert hf.buddy2hash(tester) == "e8ce19bba744f0188df2ebb4ffced4d8", tester.write("temp.del")
 
     # bipartitions
-    shutil.copy("{0}mock_resources{1}test_raxml_inputs{1}bipartitions{1}RAxML_bipartitions.result".format(RES_PATH,
-                                                                                                          os.path.sep),
-                "%s%s" % (mock_tmp_dir.path, os.path.sep))
+    shutil.copy(join(RES_PATH, "mock_resources", "test_raxml_inputs", "bipartitions", "RAxML_bipartitions.result"),
+                join(mock_tmp_dir.path, "RAxML_bipartitions.result"))
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'raxml', "-f b -z {0}{1}RAxML_bootstrap.result "
@@ -224,9 +378,9 @@ def test_raxml(alb_resources, hf, monkeypatch):
 def test_phyml(alb_resources, hf, monkeypatch):
     mock_tmp_dir = br.TempDir()
     tmp_dir = br.TempDir()
-    for root, dirs, files in os.walk("%smock_resources%stest_phyml_inputs" % (RES_PATH, os.path.sep)):
+    for root, dirs, files in os.walk(join(RES_PATH, "mock_resources", "test_phyml_inputs")):
         for _file in files:
-            shutil.copyfile("%s%s%s" % (root, os.path.sep, _file), "%s%s%s" % (mock_tmp_dir.path, os.path.sep, _file))
+            shutil.copyfile(join(root, _file), join(mock_tmp_dir.path, _file))
     monkeypatch.setattr(Pb.shutil, "which", lambda *_: True)
     monkeypatch.setattr(Pb, "Popen", MockPopen)
     monkeypatch.setattr(br, "TempDir", lambda: mock_tmp_dir)
@@ -235,46 +389,47 @@ def test_phyml(alb_resources, hf, monkeypatch):
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'phyml')
-    assert hf.buddy2hash(tester) == "9fbcfe1d565b9fd23e2c5fca86019f8e"
+    assert hf.buddy2hash(tester) == "9fbcfe1d565b9fd23e2c5fca86019f8e", tester.write("temp.del")
 
     # quiet
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'phyml', quiet=True)
-    assert hf.buddy2hash(tester) == "9fbcfe1d565b9fd23e2c5fca86019f8e"
+    assert hf.buddy2hash(tester) == "9fbcfe1d565b9fd23e2c5fca86019f8e", tester.write("temp.del")
 
     # params
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'phyml', "--sequential", quiet=True)
-    assert hf.buddy2hash(tester) == "9fbcfe1d565b9fd23e2c5fca86019f8e"
+    assert hf.buddy2hash(tester) == "9fbcfe1d565b9fd23e2c5fca86019f8e", tester.write("temp.del")
 
     # slight edges
     tester = alb_resources.get_one("o p n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'phyml-foo', tmp_dir.path, quiet=True)
-    assert hf.buddy2hash(tester) == "9fbcfe1d565b9fd23e2c5fca86019f8e"
+    assert hf.buddy2hash(tester) == "9fbcfe1d565b9fd23e2c5fca86019f8e", tester.write("temp.del")
 
     # keep
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
-    Pb.generate_tree(tester, 'phyml', keep_temp="%s%skeep_files" % (tmp_dir.path, os.path.sep))
-    root, dirs, files = next(os.walk("%s%skeep_files" % (tmp_dir.path, os.path.sep)))
+    Pb.generate_tree(tester, 'phyml', keep_temp=join(tmp_dir.path, "keep_files"))
+    root, dirs, files = next(os.walk(join(tmp_dir.path, "keep_files")))
     kept_output = ""
-    for file in sorted(files):
-        with open("%s%s%s" % (root, os.path.sep, file), "r") as ifile:
+    for _file in sorted(files):
+        with open(join(root, _file), "r") as ifile:
             kept_output += ifile.read()
     if os.name == "nt":
         assert hf.string2hash(kept_output) == "a795da6869c5e3a34962a52ec35006ed"
     else:
         assert hf.string2hash(kept_output) == "5a3559c264cb4c4779f15a515aaf2286"
 
+
 def test_fasttree(alb_resources, hf, monkeypatch):
     mock_tmp_dir = br.TempDir()
     tmp_dir = br.TempDir()
-    for root, dirs, files in os.walk("%smock_resources%stest_fasttree_inputs" % (RES_PATH, os.path.sep)):
+    for root, dirs, files in os.walk(join(RES_PATH, "mock_resources", "test_fasttree_inputs")):
         for _file in files:
-            shutil.copyfile("%s%s%s" % (root, os.path.sep, _file), "%s%s%s" % (mock_tmp_dir.path, os.path.sep, _file))
+            shutil.copyfile(join(root, _file), join(mock_tmp_dir.path, _file))
     monkeypatch.setattr(Pb.shutil, "which", lambda *_: True)
     monkeypatch.setattr(Pb, "Popen", MockPopen)
     monkeypatch.setattr(Pb, "check_output", mock_check_output)
@@ -284,34 +439,34 @@ def test_fasttree(alb_resources, hf, monkeypatch):
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'fasttree')
-    assert hf.buddy2hash(tester) == "4b2ab8c39f27b9871f9a370ca7d0c4b3"
+    assert hf.buddy2hash(tester) == "4b2ab8c39f27b9871f9a370ca7d0c4b3", tester.write("temp.del")
 
     # quiet
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'fasttree', quiet=True)
-    assert hf.buddy2hash(tester) == "4b2ab8c39f27b9871f9a370ca7d0c4b3"
+    assert hf.buddy2hash(tester) == "4b2ab8c39f27b9871f9a370ca7d0c4b3", tester.write("temp.del")
 
     # params
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'fasttree', "-pseudo", quiet=True)
-    assert hf.buddy2hash(tester) == "4b2ab8c39f27b9871f9a370ca7d0c4b3"
+    assert hf.buddy2hash(tester) == "4b2ab8c39f27b9871f9a370ca7d0c4b3", tester.write("temp.del")
 
     # slight edges
     tester = alb_resources.get_one("m p s")
     tester.hash_map = HASH_MAP
     tester = Pb.generate_tree(tester, 'fasttree-foo', quiet=True)
-    assert hf.buddy2hash(tester) == "7692ee7edb8df4f91d2bdca6c3767796"
+    assert hf.buddy2hash(tester) == "7692ee7edb8df4f91d2bdca6c3767796", tester.write("temp.del")
 
     # keep
     tester = alb_resources.get_one("o d n")
     tester.hash_map = HASH_MAP
-    Pb.generate_tree(tester, 'fasttree', keep_temp="%s%skeep_files" % (tmp_dir.path, os.path.sep))
-    root, dirs, files = next(os.walk("%s%skeep_files" % (tmp_dir.path, os.path.sep)))
+    Pb.generate_tree(tester, 'fasttree', keep_temp=join(tmp_dir.path, "keep_files"))
+    root, dirs, files = next(os.walk(join(tmp_dir.path, "keep_files")))
     kept_output = ""
-    for file in sorted(files):
-        with open("%s%s%s" % (root, os.path.sep, file), "r") as ifile:
+    for _file in sorted(files):
+        with open(join(root, _file), "r") as ifile:
             kept_output += ifile.read()
     if os.name == "nt":
         assert hf.string2hash(kept_output) == "bcd034f0db63a7b41f4b3b6661200ef3"
@@ -322,9 +477,9 @@ def test_fasttree(alb_resources, hf, monkeypatch):
 def test_generate_tree_edges(alb_resources, monkeypatch):
     mock_tmp_dir = br.TempDir()
     tmp_dir = br.TempDir()
-    for root, dirs, files in os.walk("%smock_resources%stest_fasttree_inputs" % (RES_PATH, os.path.sep)):
+    for root, dirs, files in os.walk(join(RES_PATH, "mock_resources", "test_fasttree_inputs")):
         for _file in files:
-            shutil.copyfile("%s%s%s" % (root, os.path.sep, _file), "%s%s%s" % (mock_tmp_dir.path, os.path.sep, _file))
+            shutil.copyfile(join(root, _file), join(mock_tmp_dir.path, _file))
     monkeypatch.setattr(Pb.shutil, "which", lambda *_: True)
     monkeypatch.setattr(Pb, "Popen", MockPopen)
     monkeypatch.setattr(br, "TempDir", lambda: mock_tmp_dir)
@@ -373,7 +528,7 @@ def test_hash_ids_edges(monkeypatch, pb_resources, hf, pb_odd_resources):
                            "kxFL0xMfFx"]
             self.current_value = self.values.pop()
 
-        def choice(self, *args):
+        def choice(self, *_):
             if not self.current_value:
                 self.current_value = self.values.pop()
             next_char = self.current_value[0]
@@ -401,6 +556,17 @@ def test_hash_ids_edges(monkeypatch, pb_resources, hf, pb_odd_resources):
     tester = Pb.hash_ids(pb_resources.get_one("o n"))
     assert hf.buddy2hash(tester) == "48b1b2b0e1f7012ea1a964269300ac6b"
 
+
+# ###################### 'ld', '--ladderize' ###################### #
+def test_ladderize(pb_resources, hf):
+    tester = pb_resources.get_one("m k")
+    tester = Pb.ladderize(tester)
+    assert hf.buddy2hash(tester) == "63ee71da75031d09f953932a1f0195b5"
+
+    tester = Pb.ladderize(tester, ascending=False)
+    assert hf.buddy2hash(tester) == "0dfa9fbb23428d2992b982776777428c"
+
+
 # ###################### 'li', '--list_ids' ###################### #
 hashes = [('m k', '514675543e958d5177f248708405224d'), ('m n', '229e5d7cd8bb2bfc300fd45ec18e8424'),
           ('m l', '514675543e958d5177f248708405224d')]
@@ -410,6 +576,7 @@ hashes = [('m k', '514675543e958d5177f248708405224d'), ('m n', '229e5d7cd8bb2bfc
 def test_list_ids(key, next_hash, pb_resources, hf):
     tester = str(Pb.list_ids(pb_resources.get_one(key)))
     assert hf.string2hash(tester) == next_hash
+
 
 # ###################### 'ptr', '--print_trees' ###################### #
 hashes = [('m k', ['16d1fa2a370fc41160bf06532e6f0a04', '1b276812fec15fc5f3ec21e680473994']),
@@ -428,6 +595,7 @@ def test_print_trees(key, next_hash, pb_resources, hf):
         assert hf.string2hash(tester) == next_hash[1]
     else:
         assert hf.string2hash(tester) == next_hash[0]
+
 
 # ###################### 'pr', '--prune_taxa' ###################### #
 pt_hashes = [('m k', '99635c6dbf708f94cf4dfdca87113c44'), ('m n', 'fc03b4f100f038277edf6a9f48913dd0'),
@@ -486,6 +654,7 @@ def test_root_middle(key, next_hashes, pb_resources, hf):
     tester = Pb.root(tester)
     assert hf.buddy2hash(tester) in next_hashes
 
+
 hashes = [('m k', 'f32bdc34bfe127bb0453a80cf7b01302'), ('m n', 'a7003478d75ad76ef61fcdc643ccdab8'),
           ('m l', 'c490e3a937b6ee2073c74119984a896e'), ('o k', 'eacf232776eea70b5de156328e10ecc7'),
           ('o n', '53caffda3fed5b9004b79effc6d29c36'), ('o l', '3137d568fe07d88620c08480a15006d3')]
@@ -496,6 +665,7 @@ def test_root_leaf(key, next_hash, pb_resources, hf):
     tester = pb_resources.get_one(key)
     tester = Pb.root(tester, "firSA25a")
     assert hf.buddy2hash(tester) == next_hash
+
 
 hashes = [('m k', 'edcc2400de6b0a4fb05c0a5159215ecd'), ('m n', '09e4c41d22f43b847677eec8be899a72'),
           ('m l', '89d62bd49d89daa14d2986fe8b826221'), ('o k', 'b6be77f1d16776554c5a61598ddb6899'),
@@ -525,25 +695,18 @@ def test_root_mrca2(pb_resources, hf):
 def test_show_unique(pb_odd_resources, pb_resources, hf):
     tester = Pb.PhyloBuddy(pb_odd_resources['compare'])
     Pb.show_unique(tester)
-    assert hf.buddy2hash(tester) == "ea5b0d1fcd7f39cb556c0f5df96281cf"
+    assert hf.buddy2hash(tester) == "396e27e3c7c5aa126ec07f31307a288e"
 
     with pytest.raises(AssertionError):  # If only a single tree is present
         tester = Pb.PhyloBuddy(pb_resources.get_one("m k"))
         Pb.show_unique(tester)
 
 
-def test_show_unique_unrooted(monkeypatch, pb_odd_resources, hf):
-    def mock_treeerror(*args):
-        raise TreeError(args)
-
+def test_show_unique_unrooted(pb_odd_resources, hf):
     tester = Pb.PhyloBuddy(pb_odd_resources['compare'])
     Pb.unroot(tester)
     Pb.show_unique(tester)
-    assert hf.buddy2hash(tester) == "2bba16e2c77102ba150adecc352407a9"
-
-    monkeypatch.setattr(Pb.ete3.TreeNode, 'robinson_foulds', mock_treeerror)
-    with pytest.raises(TreeError):
-        Pb.show_unique(tester)
+    assert hf.buddy2hash(tester) == "50f1d86072989ac61dcf95ee5fc19f7e"
 
 
 # ###################### 'sp', '--split_polytomies' ###################### #
@@ -562,4 +725,4 @@ def test_split_polytomies():
 def test_unroot(pb_odd_resources, hf):
     tester = Pb.PhyloBuddy(pb_odd_resources['figtree'])
     Pb.unroot(tester)
-    assert hf.buddy2hash(tester) == "10e9024301b3178cdaed0b57ba33f615"
+    assert hf.buddy2hash(tester) == "e24e85fdc2f877f9340f147d9fed5fef", print(tester)

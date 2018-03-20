@@ -11,11 +11,14 @@ import ftplib
 import urllib.request
 import argparse
 import json
+import shutil
+import Bio
 from hashlib import md5
 from time import sleep
 import datetime
 from unittest import mock
 import AlignBuddy as Alb
+import SeqBuddy as Sb
 import buddy_resources as br
 from pkg_resources import DistributionNotFound
 from configparser import ConfigParser
@@ -29,6 +32,16 @@ RESOURCE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 
 
 # Mock resources
+class MockPopen(object):
+    def __init__(self, *args, **kwargs):
+        self.kwargs = kwargs
+        if "my_mucsle" in args[0]:
+            self.output = ["Robert C. Edgar".encode("utf-8"), "".encode("utf-8")]
+
+    def communicate(self):
+        return self.output
+
+
 class MockLocation(object):
     def __init__(self):
         self.start = 0
@@ -72,8 +85,15 @@ def test_parse_phylip_format():
 
 def test_timer():
     timer = br.Timer()
+    assert type(timer.start_time) == float
+    start_time = float(timer.start_time)
+    sleep(0.1)
     timer.start()
+    assert timer.start_time > start_time
     sleep(1)
+    split = timer.split()
+    assert type(split) == float
+    assert split >= 1
     assert timer.end() == '1 sec'
 
 
@@ -127,6 +147,11 @@ def test_dynamicprint_write(capsys):
     out, err = capsys.readouterr()
     assert out == ""
     assert err == ""
+
+
+def test_dummy_func():
+    dummy = br.dummy_func("Foo", "Bar", kwarg="Hello")
+    assert dummy == (('Foo', 'Bar'), {'kwarg': 'Hello'})
 
 
 def test_pretty_time():
@@ -195,9 +220,8 @@ def test_usable_cpu_count(monkeypatch):
     monkeypatch.setattr(br, 'cpu_count', cpu_func)
     assert br.usable_cpu_count() == 1
 
-# skipping run_multicore function for now
 
-
+@br.skip_windows
 def test_run_multicore_function(monkeypatch, hf):
     temp_file = br.TempFile()
     temp_path = temp_file.path
@@ -272,6 +296,18 @@ def test_tempdir_init():
     assert os.path.exists(test_dir.path)
     assert not len(test_dir.subdirs)
     assert not len(test_dir.subfiles)
+
+
+def test_tempdir_copy_to():
+    test_dir = br.TempDir()
+    assert test_dir.copy_to(RESOURCE_PATH + "Mnemiopsis_cds.fa") == test_dir.path + os.path.sep + "Mnemiopsis_cds.fa"
+    assert os.path.isfile(test_dir.path + os.path.sep + "Mnemiopsis_cds.fa")
+
+    assert test_dir.copy_to(RESOURCE_PATH + "topcons") == test_dir.path + os.path.sep + "topcons"
+    assert os.path.isdir(test_dir.path + os.path.sep + "topcons")
+    assert os.path.isfile(test_dir.path + os.path.sep + "topcons" + os.path.sep + "rst_MFhyxO.zip")
+
+    assert not test_dir.copy_to("/path/to/nowhere.foo")
 
 
 def test_tempdir_subdirs():
@@ -501,6 +537,12 @@ def test_ask_unix(monkeypatch):
         assert not br.ask("test", default="no")
 
 
+def test_num_sorted():
+    test_list = ["aaab_10_56", "aaab_10", "aaab_3", "aaab_10_1", "aab_10.56", "aab.3", "aab_10.1", "aab.10"]
+    assert br.num_sorted(test_list) == ["aaab_3", "aaab_10", "aaab_10_1", "aaab_10_56",
+                                        "aab.3", "aab.10", "aab_10.1", "aab_10.56"], print(br.num_sorted(test_list))
+
+
 def test_guesserror():
     with pytest.raises(br.GuessError):
         error = br.GuessError("test")
@@ -614,11 +656,21 @@ def test_version():
     version = br.Version("BudddySuite", "3", "5", contributors, release_date={"day": 13, "month": 7, "year": 2016})
     assert version.short() == "3.5"
     assert version.contributors_string() == "Bud D Suite  buddysuite\nSweet Water  sweetwater"
-    version_string = re.sub("[\n| ]", "", str(version))
-    assert version_string == "BudddySuite3.5(2016-07-13)PublicDomainNoticeThisisfreesoftware;seethesourcefordetailed" \
-                             "copyingconditions.ThereisNOwarranty;notevenforMERCHANTABILITYorFITNESSFORAPARTICULAR" \
-                             "PURPOSE.Questions/comments/concernscanbedirectedtoSteveBond,steve.bond@nih.gov" \
-                             "Contributors:BudDSuitebuddysuiteSweetWatersweetwater"
+    assert str(version) == """\
+BudddySuite 3.5 (2016-07-13)
+
+Public Domain Notice
+--------------------
+This is free software; see the source for detailed copying conditions.
+There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A
+PARTICULAR PURPOSE.
+Questions/comments/concerns can be directed to Steve Bond, steve.bond@nih.gov
+--------------------
+
+Contributors:
+Bud D Suite  buddysuite
+Sweet Water  sweetwater
+""", print(str(version))
 
 
 def test_config_values(monkeypatch):
@@ -703,7 +755,7 @@ def test_error_report(monkeypatch):
     fake_error = """\
 # SeqBuddy: 1.2b6
 # Function: order_ids
-# Python: 3.5.2 |Anaconda custom (x86_64)| (default, Jul  2 2016, 17:52:12) [GCC 4.2.1 Compatible Apple LLVM 4.2 (clang-425.0.28)]
+# Python: 3.5.2 |Anaconda custom (x86_64)| (default, Jul  2 2016, 17:52:12) [GCC 4.2.1 Apple LLVM 4.2 (clang-425.0.28)]
 # Platform: darwin
 # User: hashless
 # Date: 2016-10-03
@@ -745,6 +797,13 @@ ZeroDivisionError: division by zero
     br.error_report(fake_error, True)
 
 
+def test_preparse_flags():
+    sys.argv = ['buddy_resources.py', "-v", "-foo", "blahh", "-c", "-ns", "57684", "--blast", "--bar"]
+    br.preparse_flags()
+    print(sys.argv)
+    assert sys.argv == ['buddy_resources.py', '-v', ' -foo', 'blahh', '-c', '-ns', "57684", '--blast', " --bar"]
+
+
 def test_flags(capsys, hf):
     contributors = list()
     contributors.append(br.Contributor("Bud", "Suite", "D", commits=10, github="buddysuite"))
@@ -779,6 +838,30 @@ def test_flags(capsys, hf):
     assert hf.string2hash(out) == "9ea2d4ac842b1712687034ea0abf497b"
 
 
+def test_identify_msa_program(monkeypatch, sb_resources, hf):
+    mafft = {"ver": " --help", "check": "MAFFT v[0-9]\.[0-9]+", "ver_num": "v([0-9]\.[0-9]+)",
+             "name": "mafft", "url": "http://mafft.cbrc.jp/alignment/software/"}
+    assert br.identify_msa_program("MaFfT") == mafft
+    assert br.identify_msa_program("my_MaFfT") == mafft
+    assert br.identify_msa_program("MaFfT_foo") == mafft
+
+    assert br.identify_msa_program("foobar") is False
+
+    mock_tmp_dir = br.TempDir()
+    shutil.copy("{0}{1}mock_resources{1}test_muscle{1}result".format(hf.resource_path, os.path.sep),
+                "%s%s" % (mock_tmp_dir.path, os.path.sep))
+    monkeypatch.setattr(Alb, "which", lambda *_: True)
+    monkeypatch.setattr(br, "Popen", MockPopen)
+    monkeypatch.setattr(Alb, "Popen", MockPopen)
+    monkeypatch.setattr(br, "TempDir", lambda: mock_tmp_dir)
+
+    # Weird binary given, but muscle found
+    tester = sb_resources.get_one("d f")
+    with pytest.raises(br.GuessError) as err:
+        Alb.generate_msa(tester, "my_mucsle")
+    assert "Could not determine format from raw input" in str(err)
+
+
 def test_parse_format():
     assert br.parse_format("CLUSTAL") == "clustal"
     assert br.parse_format("clustal") == "clustal"
@@ -787,16 +870,129 @@ def test_parse_format():
     assert br.parse_format("phylipr") == "phylip-relaxed"
     assert br.parse_format("phylips") == "phylipsr"
     assert br.parse_format("phylipss") == "phylipss"
+    assert br.parse_format("nexus-interleaved") == "nexusi"
+    assert br.parse_format("nexusi") == "nexusi"
+    assert br.parse_format("nexus-sequential") == "nexuss"
+    assert br.parse_format("nexuss") == "nexuss"
 
     with pytest.raises(TypeError):
         br.parse_format("buddy")
 
 
-def test_preparse_flags():
-    sys.argv = ['buddy_resources.py', "-v", "-foo", "blahh", "-c", "-ns", "57684", "--blast", "--bar"]
-    br.preparse_flags()
-    print(sys.argv)
-    assert sys.argv == ['buddy_resources.py', '-v', ' -foo', 'blahh', '-c', '-ns', "57684", '--blast', " --bar"]
+# ######################  'guess_format' ###################### #
+def test_alb_guess_format(alb_resources, alb_odd_resources):
+    assert br.guess_format(["dummy", "list"]) == "gb"
+
+    for key, obj in alb_resources.get().items():
+        assert br.guess_format(obj) == br.parse_format(alb_resources.get_key(key)["format"])
+
+    for key, path in alb_resources.get(mode="paths").items():
+        assert br.guess_format(path) == br.parse_format(alb_resources.get_key(key)["format"])
+        with open(path, "r", encoding="utf-8") as ifile:
+            assert br.guess_format(ifile) == br.parse_format(alb_resources.get_key(key)["format"])
+            ifile.seek(0)
+            string_io = io.StringIO(ifile.read())
+        assert br.guess_format(string_io) == br.parse_format(alb_resources.get_key(key)["format"])
+
+    assert br.guess_format(alb_odd_resources['blank']) == "empty file"
+    assert not br.guess_format(alb_odd_resources['dna']['single']['phylipss_recs'])
+    assert not br.guess_format(alb_odd_resources['dna']['single']['phylipss_cols'])
+
+    with pytest.raises(br.GuessError) as e:
+        br.guess_format({"Dummy dict": "Type not recognized by guess_format()"})
+    assert "Unsupported _input argument in guess_format()" in str(e)
+
+
+def test_guess_stockholm(hf):
+    assert br.guess_format("%s%sMnemiopsis_cds.stklm" % (hf.resource_path, os.path.sep)) == "stockholm"
+
+    with open("%s%sMnemiopsis_cds.stklm" % (hf.resource_path, os.path.sep), "r", encoding="utf-8") as ifile:
+        assert br.guess_format(ifile) == "stockholm"
+
+    seqbuddy = Sb.SeqBuddy("%s%sMnemiopsis_cds.stklm" % (hf.resource_path, os.path.sep))
+    assert br.guess_format(seqbuddy) == "stockholm"
+
+
+def test_guess_fasta(hf):
+    assert br.guess_format("%s%sMnemiopsis_cds.fa" % (hf.resource_path, os.path.sep)) == "fasta"
+
+    with open("%s%sMnemiopsis_cds.fa" % (hf.resource_path, os.path.sep), "r", encoding="utf-8") as ifile:
+        assert br.guess_format(ifile) == "fasta"
+
+    seqbuddy = Sb.SeqBuddy("%s%sMnemiopsis_cds.fa" % (hf.resource_path, os.path.sep))
+    assert br.guess_format(seqbuddy) == "fasta"
+
+
+def test_guess_gb(hf):
+    assert br.guess_format("%s%sMnemiopsis_cds.gb" % (hf.resource_path, os.path.sep)) == "gb"
+
+    with open("%s%sMnemiopsis_cds.gb" % (hf.resource_path, os.path.sep), "r", encoding="utf-8") as ifile:
+        assert br.guess_format(ifile) == "gb"
+
+    seqbuddy = Sb.SeqBuddy("%s%sMnemiopsis_cds.gb" % (hf.resource_path, os.path.sep))
+    assert br.guess_format(seqbuddy) == "gb"
+
+
+def test_guess_phylipss(hf):
+    assert br.guess_format("%s%sMnemiopsis_cds.physs" % (hf.resource_path, os.path.sep)) == "phylipss"
+
+    with open("%s%sMnemiopsis_cds.physs" % (hf.resource_path, os.path.sep), "r", encoding="utf-8") as ifile:
+        assert br.guess_format(ifile) == "phylipss"
+
+    seqbuddy = Sb.SeqBuddy("%s%sMnemiopsis_cds.physs" % (hf.resource_path, os.path.sep))
+    assert br.guess_format(seqbuddy) == "phylipss"
+
+
+def testguess_format(sb_resources, sb_odd_resources):
+    assert br.guess_format(["foo", "bar"]) == "gb"
+    assert br.guess_format(sb_resources.get_one("d f")) == "fasta"
+    assert br.guess_format(sb_resources.get_one("d f", mode="paths")) == "fasta"
+    assert br.guess_format(sb_odd_resources["blank"]) == "empty file"
+    with pytest.raises(br.GuessError):
+        br.guess_format("foo")
+    assert not br.guess_format(sb_odd_resources["gibberish"])
+
+
+def test_nexus_out(alb_resources, sb_resources, hf):
+    # Do not run tests until BioPython v1.71 has been released
+    if float(".".join(Bio.__version__.split(".")[:2])) < 1.71:
+        return
+    else:
+        assert 0, print("This whole if/else block can be deleted now that BioPython v1.71 is out.")
+    # AlignBuddy input
+    buddy = alb_resources.get_one("o p py")
+    nexus = br.nexus_out(buddy, "nexus")
+    assert hf.string2hash(nexus) == "49bf9b3f56104e4f19048523d725f025"
+
+    nexus = br.nexus_out(buddy, "nexusi")
+    assert hf.string2hash(nexus) == "b8ceaaffd5fd4c3b34dbec829a6f9bf1"
+
+    nexus = br.nexus_out(buddy, "nexuss")
+    assert hf.string2hash(nexus) == "49bf9b3f56104e4f19048523d725f025"
+
+    # SeqBuddy input
+    buddy = sb_resources.get_one("p pr")
+    nexus = br.nexus_out(buddy, "nexusi")
+    assert hf.string2hash(nexus) == "542acd54f66f86088f30e52449215245"
+
+    # List input
+    nexus = br.nexus_out(buddy.records, "nexuss")
+    assert hf.string2hash(nexus) == "fa8430bd8b073bd283856561818e7b56"
+
+    # Errors
+    with pytest.raises(ValueError) as err:
+        buddy = alb_resources.get_one("m p py")
+        br.nexus_out(buddy, "nexus")
+    assert "NEXUS format does not support multiple alignments in one file." in str(err)
+
+    with pytest.raises(AttributeError) as err:
+        br.nexus_out("Incorrect input", "nexus")
+    assert "`record_src` input type '<class 'str'>' not support by nexus_out." in str(err)
+
+    with pytest.raises(AttributeError) as err:
+        buddy = sb_resources.get_one("p pr")
+        br.nexus_out(buddy, "unknown_nexus")
+    assert "Unknown NEXUS format 'unknown_nexus'." in str(err)
 
 
 def test_phylip_sequential_out(alb_resources, sb_resources):
@@ -821,7 +1017,7 @@ def test_phylip_sequential_out(alb_resources, sb_resources):
 
     buddy = sb_resources.get_one("d f")
     with pytest.raises(br.PhylipError):
-        br.phylip_sequential_out(buddy, _type="seq")
+        br.phylip_sequential_out(buddy)
 
 
 def test_phylip_sequential_read(alb_odd_resources, hf, capsys):
@@ -913,7 +1109,7 @@ def test_send_traceback(capsys, monkeypatch):
 \033[mTestBuddy::FailedFunc has crashed with the following traceback:\033[91m
 
 # TestBuddy: 1.2
-# Function: FailedFunc""" in out
+# Function: FailedFunc""" in out, print(out)
 
     assert """\
 # TestBuddy: 1.2

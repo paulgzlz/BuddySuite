@@ -70,7 +70,7 @@ from Bio.Nexus.Nexus import NexusError
 
 # ################################################ GLOBALS ###################################################### #
 GAP_CHARS = ["-", ".", " "]
-VERSION = br.Version("AlignBuddy", 1, "2.7", br.contributors, {"year": 2017, "month": 6, "day": 16})
+VERSION = br.Version("AlignBuddy", 1, "4b", br.contributor_list, {"year": 2017, "month": 12, "day": 20})
 
 
 # #################################################### ALIGNBUDDY #################################################### #
@@ -85,7 +85,8 @@ class AlignBuddy(object):
         in_handle = None
         raw_seq = None
         in_file = None
-        self.hash_map = OrderedDict()  # This variable is only filled if the hash_ids() fuction is called.
+        self.hash_map = OrderedDict()  # This is only filled if hash_ids() is called.
+        self.align_tool = OrderedDict()  # This is only filled if generate_msa() is called
 
         # Handles
         if str(type(_input)) == "<class '_io.TextIOWrapper'>":
@@ -116,7 +117,7 @@ class AlignBuddy(object):
         except TypeError:  # This happens when testing something other than a string.
             pass
 
-        self.in_format = br.parse_format(in_format) if in_format else guess_format(_input)
+        self.in_format = br.parse_format(in_format) if in_format else br.guess_format(_input)
 
         if self.in_format == "empty file":
             raise br.GuessError("Empty file")
@@ -145,7 +146,7 @@ class AlignBuddy(object):
             sample = _input if len(_input) < 5 else random.sample(_input, 5)
             for _seq in sample:
                 if type(_seq) != MultipleSeqAlignment:
-                    raise TypeError("Seqlist is not populated with SeqRecords.")
+                    raise TypeError("Alignlist is not populated with MultipleSeqAlignment.")
             alignments = _input
 
         elif str(type(_input)) == "<class '_io.TextIOWrapper'>" or isinstance(_input, StringIO):
@@ -203,13 +204,24 @@ class AlignBuddy(object):
         if self.out_format in multiple_alignments_unsupported and len(self.alignments) > 1:
             raise ValueError("%s format does not support multiple alignments in one file.\n" % self.out_format)
 
+        output = ""
         if self.out_format == "phylipsr":
             output = br.phylip_sequential_out(self)
 
         elif self.out_format == "phylipss":
             output = br.phylip_sequential_out(self, relaxed=False)
 
-        else:
+        elif self.out_format.startswith("nexus"):
+            try:
+                output = br.nexus_out(self, self.out_format)
+            except ValueError as e:
+                if "Sequences must all be the same length" in str(e):
+                    br._stderr("Warning: Alignment format detected but sequences are different lengths. "
+                               "Format changed to fasta to accommodate proper printing of records.\n\n")
+                    self.out_format = "fasta"
+                else:
+                    raise e
+        if not output:
             tmp_file = br.TempFile()
             with open(tmp_file.path, "w", encoding="utf-8") as ofile:
                 try:
@@ -303,56 +315,6 @@ def guess_alphabet(alignments):
         return IUPAC.protein
 
 
-def guess_format(_input):  # _input can be list, SeqBuddy object, file handle, or file path.
-    # If input is just a list, there is no BioPython in-format. Default to stockholm.
-    if isinstance(_input, list):
-        return "stockholm"
-
-    # Pull value directly from object if appropriate
-    if _input.__class__.__name__ == 'AlignBuddy':
-        return _input.in_format
-
-    # If input is a handle or path, try to read the file in each format, and assume success if not error and # seqs > 0
-    if os.path.isfile(str(_input)):
-        _input = open(_input, "r", encoding="utf-8")
-
-    if str(type(_input)) == "<class '_io.TextIOWrapper'>" or isinstance(_input, StringIO):
-        if not _input.seekable():  # Deal with input streams (e.g., stdout pipes)
-            _input = StringIO(_input.read().decode("utf-8"))
-        if _input.read() == "":
-            return "empty file"
-        _input.seek(0)
-
-        possible_formats = ["gb", "phylipss", "phylipsr", "phylip", "phylip-relaxed",
-                            "stockholm", "fasta", "nexus", "clustal"]
-        for next_format in possible_formats:
-            try:
-                _input.seek(0)
-                if next_format in ["phylip", "phylipsr", "phylipss"]:
-                    phylip = br.phylip_guess(next_format, _input)
-                    if phylip:
-                        return phylip
-                    else:
-                        continue
-
-                if list(AlignIO.parse(_input, next_format)):
-                    _input.seek(0)
-                    return br.parse_format(next_format)
-                else:
-                    continue
-            except br.PhylipError:
-                continue
-            except NexusError:
-                continue
-            except ValueError:
-                continue
-
-        return None  # Unable to determine format from file handle
-
-    else:
-        raise br.GuessError("Unsupported _input argument in guess_format(). %s" % type(_input))
-
-
 def make_copy(alignbuddy):
     alphabet_list = [rec.seq.alphabet for rec in alignbuddy.records()]
     _copy = deepcopy(alignbuddy)
@@ -370,8 +332,9 @@ class FeatureReMapper(object):
             specifying whether that column exists in the new alignment or not. Remap the features on the new alignment
             by calling the remap_features method.
     """
-    def __init__(self):
-        self.position_map = []
+    def __init__(self, max_len):
+        self.position_map = [None for _ in range(max_len)]
+        self.position_map_indx = 0
         self.starting_position_filled = False
 
     def extend(self, exists=True):
@@ -379,19 +342,19 @@ class FeatureReMapper(object):
         Iterates the position map, adding an index and whether the new alignment contains the column.
         :param exists: Specify whether the next column exists or not
         """
-        if not self.position_map:
+        if self.position_map[0] is None:
             if exists:
                 self.starting_position_filled = True
-            self.position_map.append((0, exists))
-
+            self.position_map[self.position_map_indx] = (0, exists)
         else:
             if exists and not self.starting_position_filled:
-                self.position_map.append((0, True))
+                self.position_map[self.position_map_indx] = (0, True)
                 self.starting_position_filled = True
             elif exists and self.starting_position_filled:
-                self.position_map.append((self.position_map[-1][0] + 1, True))
+                self.position_map[self.position_map_indx] = (self.position_map[self.position_map_indx - 1][0] + 1, True)
             else:
-                self.position_map.append((self.position_map[-1][0], False))
+                self.position_map[self.position_map_indx] = (self.position_map[self.position_map_indx - 1][0], False)
+        self.position_map_indx += 1
         return
 
     def remap_features(self, old_alignment, new_alignment):
@@ -444,7 +407,7 @@ class FeatureReMapper(object):
             return feature
 
     def append_pos_map(self, alignment):
-        alignment.position_map = self.position_map
+        alignment.position_map = self.position_map[:self.position_map_indx + 1]
         return
 
 
@@ -472,7 +435,7 @@ def bootstrap(alignbuddy, num_bootstraps=1, r_seed=None):
     :param r_seed: Set a seed value so 'random' numbers are reproducible
     :rtype: AlignBuddy
     """
-    rand_gen = random.Random() if not r_seed else random.Random(r_seed)
+    rand_gen = random.Random(r_seed)
 
     new_alignments = []
     for align_indx, alignment in enumerate(alignbuddy.alignments):
@@ -529,12 +492,13 @@ def clean_seq(alignbuddy, ambiguous=True, rep_char="N", skip_list=None):
     return alignbuddy
 
 
-def concat_alignments(alignbuddy, group_pattern=None, align_name_pattern=""):
+def concat_alignments(alignbuddy, group_pattern=None, align_name_pattern="", suppress_position=False):
     """
     Concatenates two or more alignments together, end-to-end
     :param alignbuddy: AlignBuddy object
     :param group_pattern: Regex that matches some regular part of the sequence IDs, dictating who is bound to who
     :param align_name_pattern: Regex that matches something for the whole alignment
+    :param suppress_position: Do not append new features denoting the location of each concatenated sequence
     :return: AlignBuddy object containing a single concatenated alignment
     :rtype: AlignBuddy
     """
@@ -610,21 +574,23 @@ def concat_alignments(alignbuddy, group_pattern=None, align_name_pattern=""):
         new_length = 0
         align_features = []
         for rec_indx, rec in enumerate(seqs):
-            location = FeatureLocation(new_length, new_length + len(rec.seq))
-            match = re.search(align_name_pattern, rec.id)
-            if align_name_pattern != "" and match:
-                if match.groups():
-                    match = "".join(match.groups())
+            if not suppress_position:
+                location = FeatureLocation(new_length, new_length + len(rec.seq))
+                match = re.search(align_name_pattern, rec.id)
+                if align_name_pattern != "" and match:
+                    if match.groups():
+                        match = "".join(match.groups())
+                    else:
+                        match = match.group(0)
+                    feature = SeqFeature(location=location, type=match)
                 else:
-                    match = match.group(0)
-                feature = SeqFeature(location=location, type=match)
-            else:
-                if str(rec.id) != "<unknown id>":
-                    feature = SeqFeature(location=location, type=rec.id)
-                else:
-                    feature = SeqFeature(location=location, type="Alignment_%s" % (rec_indx + 1))
-            align_features.append(feature)
+                    if str(rec.id) != "<unknown id>":
+                        feature = SeqFeature(location=location, type=rec.id)
+                    else:
+                        feature = SeqFeature(location=location, type="Alignment_%s" % (rec_indx + 1))
+                align_features.append(feature)
             new_length += len(rec.seq)
+
         new_records[group_indx].features = align_features + new_records[group_indx].features
         group_indx += 1
 
@@ -632,36 +598,166 @@ def concat_alignments(alignbuddy, group_pattern=None, align_name_pattern=""):
     return alignbuddy
 
 
-def consensus_sequence(alignbuddy):
+def consensus_sequence(alignbuddy, mode="weighted"):
     # ToDo: include an ambiguous mode that will pull the degenerate nucleotide alphabet in the case of frequency ties.
+    # ToDo: Retain sequence annotations --> options to include ALL or CONSERVED
     """
     Generates a simple majority-rule consensus sequence
     :param alignbuddy: The AlignBuddy object to be processed
+    :param mode: Simple majority rule or weighted (Henikoff & Henikoff J. Mol. Biol. 1994) [simple, weighted]
     :return: The modified AlignBuddy object (with a single record in each alignment)
     :rtype: AlignBuddy
     """
     consensus_sequences = []
-    for alignment in alignbuddy.alignments:
-        alpha = guess_alphabet(alignment)
-        ambig_char = "X" if alpha == IUPAC.protein else "N"
-        new_seq = ""
-        for indx in range(alignment.get_alignment_length()):
-            residues = {}
+
+    if mode == "weighted":
+        for alignment in alignbuddy.alignments:
+            alpha = guess_alphabet(alignment)
+            ambig_char = "X" if alpha == IUPAC.protein else "N"
+            new_seq = ""
+            scores_all_pos = {}
+            sequence_weights = {}
+            for indx in range(alignment.get_alignment_length()):
+                residues = {}
+                scores_this_pos = {}
+                for rec in alignment:
+                    residue = rec.seq[indx]
+                    residues.setdefault(residue, 0)
+                    residues[residue] += 1
+                num_residues = len(residues)
+                for aminoacid in residues:
+                    s = residues[aminoacid]
+                    score = float(1) / (num_residues * s)
+                    scores_this_pos[aminoacid] = score
+                    scores_all_pos[indx] = scores_this_pos
+
             for rec in alignment:
-                residue = rec.seq[indx]
-                residues.setdefault(residue, 0)
-                residues[residue] += 1
-            residues = sorted(residues.items(), key=lambda x: x[1], reverse=True)
-            if len(residues) == 1 or residues[0][1] != residues[1][1]:
-                new_seq += residues[0][0]
-            else:
-                new_seq += ambig_char
-        new_seq = Seq(new_seq, alphabet=alpha)
-        description = "Original sequences: %s" % ", ".join([rec.id for rec in alignment])
-        new_seq = SeqRecord(new_seq, id="consensus", name="consensus",
-                            description=description)
-        consensus_sequences.append(MultipleSeqAlignment([new_seq], alphabet=alpha))
+                seq_score = 0
+                for indx in range(alignment.get_alignment_length()):
+                    residue_type = str(rec.seq[indx])
+                    residue_score = scores_all_pos[indx][residue_type]
+                    seq_score += residue_score
+                seq_id = rec.id
+                sequence_weights[seq_id] = seq_score
+
+            for indx in range(alignment.get_alignment_length()):
+                aa_vote_tracker = {}
+                for rec in alignment:
+                    seq_id = rec.id
+                    residue = rec.seq[indx]
+                    residue_vote = sequence_weights[seq_id]
+                    aa_vote_tracker.setdefault(residue, 0)
+                    aa_vote_tracker[residue] += residue_vote
+
+                aa_vote_tracker = sorted(aa_vote_tracker.items(), key=lambda x: x[1], reverse=True)
+
+                if len(aa_vote_tracker) == 1 or aa_vote_tracker[0][1] != aa_vote_tracker[1][1]:
+                    new_seq += aa_vote_tracker[0][0]
+
+                else:
+                    new_seq += ambig_char
+
+            new_seq = Seq(new_seq, alphabet=alpha)
+            description = "Original sequences: %s" % ", ".join([rec.id for rec in alignment])
+            new_seq = SeqRecord(new_seq, id="consensus", name="consensus",
+                                description=description)
+            consensus_sequences.append(MultipleSeqAlignment([new_seq], alphabet=alpha))
+
+    elif mode == "simple":
+        for alignment in alignbuddy.alignments:
+            alpha = guess_alphabet(alignment)
+            ambig_char = "X" if alpha == IUPAC.protein else "N"
+            new_seq = ""
+            for indx in range(alignment.get_alignment_length()):
+                residues = {}
+                for rec in alignment:
+                    residue = rec.seq[indx]
+                    residues.setdefault(residue, 0)
+                    residues[residue] += 1
+                residues = sorted(residues.items(), key=lambda x: x[1], reverse=True)
+                if len(residues) == 1 or residues[0][1] != residues[1][1]:
+                    new_seq += residues[0][0]
+                else:
+                    new_seq += ambig_char
+            new_seq = Seq(new_seq, alphabet=alpha)
+            description = "Original sequences: %s" % ", ".join([rec.id for rec in alignment])
+            new_seq = SeqRecord(new_seq, id="consensus", name="consensus",
+                                description=description)
+            consensus_sequences.append(MultipleSeqAlignment([new_seq], alphabet=alpha))
+
+    else:
+        raise ValueError("No valid consensus mode specified (valid modes are 'simple' and 'weighted')")
+
     alignbuddy.alignments = consensus_sequences
+    alignbuddy = trimal(alignbuddy, 'clean')
+    return alignbuddy
+
+
+def delete_invariant_sites(alignbuddy, consider_ambiguous=True):
+    """
+    Deletes columns where all residues are the same, either explicitly or ambiguously.
+    :param alignbuddy: AlignBuddy object
+    :param consider_ambiguous: Specify how ambiguous residues are treated ('True' means they can overlap
+    the standard code and may be deleted)
+    :return: The modified AlignBuddy object
+    :rtype: AlignBuddy
+    """
+    from Bio.Data import IUPACData
+    nucs = {'A', 'U', 'C', 'G'} if alignbuddy.alpha == IUPAC.ambiguous_rna else {'A', 'T', 'C', 'G'}
+    ambiguiity_codes = IUPACData.ambiguous_rna_values if alignbuddy.alpha == IUPAC.ambiguous_rna \
+        else IUPACData.ambiguous_dna_values
+
+    for alignment_index, alignment in enumerate(alignbuddy.alignments):
+        keep_columns = []
+        if not alignment:
+            continue  # Prevent crash if the alignment doesn't have any records in it
+
+        for col_indx in range(alignment.get_alignment_length()):
+            col = set([i.upper() for i in alignment[:, col_indx]])
+
+            # Fully invariant columns discarded
+            if len(col) == 1:
+                continue
+
+            # Simplest scenario, there are differences in the column and we don't care about ambiguous residues
+            elif not consider_ambiguous:
+                keep_columns.append(col_indx)
+                continue
+
+            # Everything else takes ambiguity into consideration
+            # Discard fully ambiguous residues
+            for i in ["X", "-", ".", "*"]:
+                col.discard(i)
+            if alignbuddy.alpha != IUPAC.protein:
+                col.discard("N")
+
+            # Again, fully invariant columns discarded
+            if len(col) <= 1:
+                pass
+            elif alignbuddy.alpha == IUPAC.protein:
+                # No partially ambiguous protein characters considered
+                keep_columns.append(col_indx)
+            # Now it gets trickier... There are many ambiguities possible in nucleotide seqs
+            elif len(nucs - col) <= 2:
+                # At least two standard residues are present
+                keep_columns.append(col_indx)
+            else:
+                # If we've gotten this far, then there must be at least one ambiguous character
+                # Go through each standard residue to see if all col residues can be matched to it
+                invariant = False
+                for i in nucs:
+                    counter = 0
+                    for j in col:
+                        if i in ambiguiity_codes[j]:
+                            counter += 1
+                    if counter == len(col):
+                        invariant = True
+                        break
+                if not invariant:
+                    keep_columns.append(col_indx)
+        keep_columns = [str(i + 1) for i in keep_columns]
+        alignment = extract_regions(AlignBuddy([alignment]), ",".join(keep_columns)).alignments[0]
+        alignbuddy.alignments[alignment_index] = alignment
     return alignbuddy
 
 
@@ -802,6 +898,16 @@ def extract_feature_sequences(alignbuddy, patterns):
                 for feat in rec.features:
                     if re.search(pat, feat.type):
                         matches.append([int(feat.location.start), int(feat.location.end)])
+                    else:
+                        breakout = False
+                        for qual_type, quals in feat.qualifiers.items():
+                            for qual in quals:
+                                if re.search(pat, qual):
+                                    matches.append([int(feat.location.start), int(feat.location.end)])
+                                    breakout = True
+                                    break
+                            if breakout:
+                                break
             if matches:
                 matches = sorted(matches, key=lambda x: x[0])
                 start, end = matches[0]
@@ -875,6 +981,49 @@ def extract_regions(alignbuddy, positions):
     return alignbuddy
 
 
+def faux_alignment(seqbuddy, size=0, r_seed=None):
+    """
+    Creates a meaningless alignment out of a collection of sequences. Gaps are added into each sequence at random
+    to create the appropriate length
+    :param seqbuddy:
+    :param size: The final length of the alignment (defaults to the length of the longest sequence)
+    :type size: int
+    :param r_seed: Set the random generator seed value
+    :return:
+    """
+    from scipy.stats import gamma
+    rand_gen = random.Random(r_seed)
+    gamma_50 = gamma.ppf(0.5, 4)
+    gamma_scale = 20 / gamma_50
+
+    def gamma_draw(remaining_gaps):
+        draw = gamma.ppf(rand_gen.random(), 4)  # sample the gamma distribution
+        draw *= gamma_scale  # Scale to the empirically determined value
+        draw /= 100  # Convert to percentage
+        draw = 1 if draw > 1 else draw  # Ensure we don't go over 100%
+        return ceil(remaining_gaps * draw)
+
+    seqbuddy = Sb.clean_seq(seqbuddy, skip_list="*")
+    max_length = Sb.max_records(Sb.make_copy(seqbuddy))
+    max_length = len(max_length.records[0])
+    max_length = size if size and size > max_length else max_length
+    records = []
+    for rec in Sb.make_copy(seqbuddy).records:
+        gaps = max_length - len(rec)
+        seq = list(str(rec.seq))
+        while gaps > 0:
+            next_gap = gamma_draw(gaps)
+            gaps -= next_gap
+            r = rand_gen.randint(1, len(seq) - 1)
+            seq = seq[:r] + ['-' * next_gap] + seq[r:]
+        rec.seq = Seq("".join(seq), rec.seq.alphabet)
+        records.append(rec)
+    gapped_seqbuddy = Sb.SeqBuddy(records, out_format='fasta')
+    alignbuddy = AlignBuddy(str(gapped_seqbuddy), out_format=seqbuddy.out_format)
+    alignbuddy = map_features2alignment(seqbuddy, alignbuddy)
+    return alignbuddy
+
+
 # ToDo: Completely refactor the handling of output formats
 def generate_msa(seqbuddy, alias, params=None, keep_temp=None, quiet=False):
     """
@@ -891,35 +1040,8 @@ def generate_msa(seqbuddy, alias, params=None, keep_temp=None, quiet=False):
         params = ''
 
     # Figure out what tool is being used
-    tool_list = {'mafft': {"ver": " --help", "check": "MAFFT v[0-9]\.[0-9]+ ",
-                           "url": "http://mafft.cbrc.jp/alignment/software/"},
-                 'prank': {"ver": " -help", "check": "prank v\.[0-9]+",
-                           "url": "http://wasabiapp.org/software/prank/prank_installation/"},
-                 'pagan': {"ver": " -v", "check": "This is PAGAN",
-                           "url": "http://wasabiapp.org/software/pagan/pagan_installation/"},
-                 'muscle': {"ver": " -version", "check": "Robert C. Edgar",
-                            "url": "http://www.drive5.com/muscle/downloads.htm"},
-                 'clustalw': {"ver": " -help", "check": "CLUSTAL.*Multiple Sequence Alignments",
-                              "url": "http://www.clustal.org/clustal2/#Download"},
-                 'clustalo': {"ver": " -h", "check": "Clustal Omega - [0-9]+\.[0-9]+",
-                              "url": "http://www.clustal.org/omega/#Download"}}
+    tool = br.identify_msa_program(alias)
 
-    def check_lower(input_str):
-        input_str = str(input_str).lower()
-        if input_str in tool_list:
-            return input_str
-        for x in tool_list:
-            if x in input_str:
-                return x
-        return False
-
-    tool = check_lower(alias)
-    if not tool:
-        for prog, args in tool_list.items():
-            version = Popen("%s%s" % (alias, args["ver"]), shell=True, stderr=PIPE, stdout=PIPE).communicate()
-            if re.search(args['check'], version[0].decode()) or re.search(args['check'], version[1].decode()):
-                tool = prog
-                break
     if not tool:
         raise AttributeError("{0} is not a recognized alignment tool. "
                              "Please check your spelling (case sensitive)".format(alias))
@@ -933,7 +1055,7 @@ def generate_msa(seqbuddy, alias, params=None, keep_temp=None, quiet=False):
     if not which(alias):
         error_msg = '#### Could not find %s on your system. ####\n ' \
                     'Please check that your spelling is correct (case sensitive) or go to %s to install %s.' \
-                    % (alias, tool_list[tool]["url"], tool)
+                    % (alias, tool["url"], tool["name"])
         raise SystemError(error_msg)
     else:
         valve = br.SafetyValve(global_reps=10)
@@ -993,22 +1115,24 @@ def generate_msa(seqbuddy, alias, params=None, keep_temp=None, quiet=False):
 
                 params = ' '.join(params)
 
-                if tool == 'clustalo':
+                if tool["name"] == 'clustalo':
                     command = '{0} {1} -i {2} -o {3}{4}result -v'.format(alias, params, tmp_in, tmp_dir.path, os.sep)
-                elif tool == 'clustalw':
+                elif tool["name"] == 'clustalw':
                     command = '{0} -infile={1} {2} -outfile={3}{4}result'.format(alias, tmp_in, params,
                                                                                  tmp_dir.path, os.sep)
-                elif tool == 'muscle':
+                elif tool["name"] == 'muscle':
                     command = '{0} -in {1} {2}'.format(alias, tmp_in, params)
-                elif tool == 'prank':
+                elif tool["name"] == 'prank':
                     command = '{0} -d={1} {2} -o={3}{4}result'.format(alias, tmp_in, params, tmp_dir.path, os.sep)
-                elif tool == 'pagan':
+                elif tool["name"] == 'pagan':
                     command = '{0} -s {1} {2} -o {3}{4}result'.format(alias, tmp_in, params, tmp_dir.path, os.sep)
-                elif tool == 'mafft':
+                elif tool["name"] == 'mafft':
                     command = '{0} {1} {2}'.format(alias, params, tmp_in)
 
                 try:
-                    if tool in ['prank', 'pagan', 'clustalo']:
+                    if tool["name"] in ['prank', 'pagan', 'clustalo']:
+                        if tool["name"] == 'pagan' and len(seqbuddy) < 4:
+                            raise ValueError("PAGAN cannot run when less than 4 sequences are passed in.")
                         if quiet:
                             output = Popen(command, shell=True, universal_newlines=True,
                                            stdout=PIPE, stderr=PIPE).communicate()
@@ -1022,13 +1146,14 @@ def generate_msa(seqbuddy, alias, params=None, keep_temp=None, quiet=False):
                             output = Popen(command, shell=True, stdout=PIPE).communicate()
                         output = output[0].decode("utf-8")
                 except CalledProcessError:
-                    br._stderr('\n#### {0} threw an error. Scroll up for more info. ####\n\n'.format(tool), quiet)
+                    br._stderr('\n#### {0} threw an error. Scroll up for more info. ####\n\n'.format(tool["name"]),
+                               quiet)
                     sys.exit()
 
-                if tool.startswith('clustal'):
+                if tool["name"].startswith('clustal'):
                     with open('{0}{1}result'.format(tmp_dir.path, os.path.sep), "r", encoding="utf-8") as result:
                         output = result.read()
-                elif tool == 'prank':
+                elif tool["name"] == 'prank':
                     possible_files = os.listdir(tmp_dir.path)
                     filename = 'result.best.fas'
                     for _file in possible_files:
@@ -1036,16 +1161,16 @@ def generate_msa(seqbuddy, alias, params=None, keep_temp=None, quiet=False):
                             filename = _file
                     with open('{0}{1}{2}'.format(tmp_dir.path, os.path.sep, filename), "r", encoding="utf-8") as result:
                         output = result.read()
-                elif tool == 'pagan':
+                elif tool["name"] == 'pagan':
                     with open('{0}{1}result.fas'.format(tmp_dir.path, os.path.sep), "r", encoding="utf-8") as result:
                         output = result.read()
-                    if os.path.isfile(".%swarnings" % os.path.sep):  # Pagan spits out this file (I've never seen anything in it)
+                    if os.path.isfile(".%swarnings" % os.path.sep):  # Pagan spits out this empty file
                         os.remove(".%swarnings" % os.path.sep)
 
                 # Fix broken outputs to play nicely with AlignBuddy parsers
-                if (tool == 'mafft' and '--clustalout' in params) or \
-                        (tool == 'clustalw' and '-output' not in params) or \
-                        (tool == 'clustalo' and ('clustal' in params or '--outfmt clu' in params or
+                if (tool["name"] == 'mafft' and '--clustalout' in params) or \
+                        (tool["name"] == 'clustalw' and '-output' not in params) or \
+                        (tool["name"] == 'clustalo' and ('clustal' in params or '--outfmt clu' in params or
                          '--outfmt=clu' in params)):
                     # Clustal format extra spaces
                     contents = ''
@@ -1091,9 +1216,41 @@ def generate_msa(seqbuddy, alias, params=None, keep_temp=None, quiet=False):
 
             except FileNotFoundError:
                 pass
+        version = Popen("%s%s" % (alias, tool["ver"]), shell=True, stderr=PIPE, stdout=PIPE).communicate()
+        version = version[0].decode() + "\n" + version[1].decode()
+        version = re.search(tool['ver_num'], version).group(1)
+
+        alignbuddy.align_tool["tool"] = tool["name"].upper()
+        alignbuddy.align_tool["version"] = version
 
         br._stderr("Returning to AlignBuddy...\n\n", quiet)
         return alignbuddy
+
+
+def generate_hmm(alignbuddy, alias="hmmbuild"):
+    """
+    Call hmmerbuild and create an hmm file
+    :param alignbuddy:
+    :param alias: Specify the binary name of hmmbuild
+    :return:
+    """
+    if not which(alias):
+        raise SystemError("Could not find %s on your system. Please check your spelling or install HMMER3." % alias)
+
+    tmp_dir = br.TempDir()
+    for align in alignbuddy.alignments:
+        align_file = tmp_dir.subfile("align.sto")
+        hmm_file = tmp_dir.subfile("align.hmm")
+        with open(align_file, "w") as ofile:
+            AlignIO.write(align, ofile, "stockholm")
+        out, err = Popen("%s %s %s" % (alias, hmm_file, align_file), shell=True, stdout=PIPE, stderr=PIPE).communicate()
+        with open(hmm_file, "r") as ifile:
+            hmm = ifile.read()
+            if not hmm:
+                raise SystemError("No output detected after running %s." % alias)
+            align.hmm = hmm
+            align.hmm_out = out.decode()
+    return alignbuddy
 
 
 def hash_ids(alignbuddy, hash_length=10, r_seed=None):
@@ -1218,6 +1375,66 @@ def order_ids(alignbuddy, reverse=False):
         alignment = Sb.SeqBuddy(list(alignment))
         Sb.order_ids(alignment, reverse=reverse)
         alignbuddy.alignments[indx] = MultipleSeqAlignment(alignment.records)
+    return alignbuddy
+
+
+def percent_id(alignbuddy):
+    """
+    Pairwise comparison of all sequences in the alignment, returning a matrix of percent match (exact).
+    Note that the matrix itself is appended to the alignment objects, and does not alter the actual sequences at all
+    :param alignbuddy:
+    :return:
+    """
+    for alignment in alignbuddy.alignments:
+        matrix = OrderedDict()
+        for i, rec1 in enumerate(alignment):
+            matrix.setdefault(rec1.id, OrderedDict())
+            for rec2 in alignment[i+1:]:
+                matrix.setdefault(rec2.id, OrderedDict())
+                id_counter = 0
+                gap_counter = 0
+                for a, b in zip(list(rec1.seq), list(rec2.seq)):
+                    if a == b == "-":
+                        gap_counter += 1
+                        continue
+                    id_counter += 1 if a == b else 0
+                len_align = len(rec1) - gap_counter
+                matrix[rec1.id][rec2.id] = id_counter / len_align
+                matrix[rec2.id][rec1.id] = id_counter / len_align
+        alignment.percent_ids = matrix
+    return alignbuddy
+
+
+def position_frequency_matrix(alignbuddy):
+    """
+    Count the frequency of each residue at each position.
+    :param alignbuddy:
+    :return:
+    """
+    for alignment, length in zip(alignbuddy.alignments, alignbuddy.lengths()):
+        if alignbuddy.alpha == IUPAC.ambiguous_dna:
+            residues = {res for res in IUPAC.unambiguous_dna.letters}
+        elif alignbuddy.alpha == IUPAC.ambiguous_rna:
+            residues = {res for res in IUPAC.unambiguous_rna.letters}
+        else:
+            residues = {res for res in IUPAC.protein.letters}
+
+        columns = [{} for _ in range(length)]
+        for col_indx in range(length):
+            for res in alignment[:, col_indx]:
+                residues.add(res)
+                columns[col_indx].setdefault(res, 0)
+                columns[col_indx][res] += 1
+
+        residues = sorted(residues)
+        non_alpha = [char for char in residues if char.isalpha() is False]
+        residues = residues[len(non_alpha):] + non_alpha
+        pfm = [OrderedDict([(res, 0) for res in residues]) for _ in range(length)]
+        num_seqs = len(alignment)
+        for indx, col in enumerate(columns):
+            for res, count in col.items():
+                pfm[indx][res] = round(count / num_seqs, 6)
+        setattr(alignment, "pfm", pfm)
     return alignbuddy
 
 
@@ -1393,7 +1610,7 @@ def trimal(alignbuddy, threshold):
 
         # Each position_map index corresponds to the original column position, values are tuples of the new position
         # and whether the column still exists (True) or has been deleted (False)
-        position_map = FeatureReMapper()
+        position_map = FeatureReMapper(len(alignment[0]))
 
         max_gaps = 0
         for indx in range(num_columns):
@@ -1528,7 +1745,7 @@ def argparse_init():
 
     try:
         # Some tools do not start with AlignBuddy objs, so skip this for those rare cases
-        if not in_args.generate_alignment:
+        if not in_args.generate_alignment and not in_args.faux_align:
             for align_set in in_args.alignments:
                 if isinstance(align_set, TextIOWrapper) and align_set.buffer.raw.isatty():
                     br._stderr("Warning: No input detected so AlignBuddy is aborting...\n"
@@ -1558,6 +1775,7 @@ def argparse_init():
         else:
             raise e
 
+    in_args.random_seed = None if not in_args.random_seed else in_args.random_seed
     return in_args, alignbuddy
 
 
@@ -1566,10 +1784,17 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
     def _print_aligments(_alignbuddy):
         try:
             _output = str(_alignbuddy)
-        except ValueError as err:
-            br._stderr("ValueError: %s\n" % str(err))
+        except ValueError as _err:
+            br._stderr("ValueError: %s\n" % str(_err))
             return False
-
+        except TypeError as _err:  # Catching biopython/nexus issue
+            if " unexpected keyword argument 'interleave'" in str(_err) and _alignbuddy.out_format.startswith("nexus"):
+                br._stderr("WARNING: Attempting to write NEXUS format '%s' with an old version of "
+                           "BioPython. Switching to default nexus.\n" % _alignbuddy.out_format, in_args.quiet)
+                _alignbuddy.out_format = "nexus"
+                _output = str(_alignbuddy)
+            else:
+                raise _err
         if in_args.test:
             br._stderr("*** Test passed ***\n", in_args.quiet)
 
@@ -1579,6 +1804,23 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
         else:
             br._stdout("%s" % _output)
         return True
+
+    def create_seqbuddy():
+        sb = []
+        seq_set = None
+        for seq_set in in_args.alignments:
+            if isinstance(seq_set, TextIOWrapper) and seq_set.buffer.raw.isatty():
+                br._stderr("Warning: No input detected so AlignBuddy is aborting...\n"
+                           "For more information, try:\n%s --help\n" % sys.argv[0])
+                sys.exit()
+
+            seq_set = Sb.SeqBuddy(seq_set, in_args.in_format, in_args.out_format)
+            sb += seq_set.records
+        if seq_set:
+            sb = Sb.SeqBuddy(sb, seq_set.in_format, seq_set.out_format)
+        else:
+            sb = Sb.SeqBuddy(sb, in_args.in_format, in_args.out_format)
+        return sb
 
     def _in_place(_output, file_path):
         if not os.path.exists(file_path):
@@ -1630,7 +1872,7 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
     # Bootstrap
     if in_args.bootstrap:
         num_bootstraps = in_args.bootstrap[0] if in_args.bootstrap[0] else 1
-        _print_aligments(bootstrap(alignbuddy, num_bootstraps))
+        _print_aligments(bootstrap(alignbuddy, num_bootstraps=num_bootstraps, r_seed=in_args.random_seed))
         _exit("bootstrap")
 
     # Clean Seq
@@ -1690,8 +1932,24 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
 
     # Consensus sequence
     if in_args.consensus:
-        _print_aligments(consensus_sequence(alignbuddy))
+        con = "w" if in_args.consensus[0] is None else in_args.consensus[0]
+        con = con.lower()
+        con = "simple" if "simple".startswith(con) else con
+        con = "weighted" if "weighted".startswith(con) else con
+        try:
+            alignbuddy = consensus_sequence(alignbuddy, con)
+        except ValueError as err:
+            _raise_error(err, "consensus", "No valid consensus mode")
+        _print_aligments(alignbuddy)
         _exit("consensus")
+
+    # Delete invariant sites
+    if in_args.delete_invariant_sites:
+        ambig = False if in_args.delete_invariant_sites[0] \
+                        and in_args.delete_invariant_sites[0].startswith("amb") else True
+        alignbuddy = delete_invariant_sites(alignbuddy, ambig)
+        _print_aligments(alignbuddy)
+        _exit("delete_invariant_sites")
 
     # Delete records
     if in_args.delete_records:
@@ -1775,9 +2033,25 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
             alignbuddy = extract_regions(alignbuddy, args)
             _print_aligments(alignbuddy)
         except ValueError as e:
-            # ToDo: output some information about position string syntax
-            _raise_error(e, "extract_positions", "Unable to decode the positions string")
+            br._stderr("""
+Extraction regions can be specified in the following ways:
+    - Singlets: "2,5,9,-5"
+    - Ranges: "40:75,89:100,432:-45"
+    - mth of nth: "1/5,3/5"
+
+For examples, please see:
+https://github.com/biologyguy/BuddySuite/wiki/AB-Extract-regions
+
+""")
+            _raise_error(e, "extract_regions", "Unable to decode the positions string")
         _exit("extract_regions")
+
+    # Faux alignment
+    if in_args.faux_align:
+        seqbuddy = create_seqbuddy()
+        in_args.faux_align = 0 if not in_args.faux_align[0] else in_args.faux_align[0]
+        _print_aligments(faux_alignment(seqbuddy, in_args.faux_align, r_seed=in_args.random_seed))
+        _exit("faux_align")
 
     # Generate Alignment
     if in_args.generate_alignment:
@@ -1792,20 +2066,7 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
             _raise_error(AttributeError("Unable to identify any supported alignment tools on your system."),
                          "generate_alignment")
 
-        seqbuddy = []
-        seq_set = None
-        for seq_set in in_args.alignments:
-            if isinstance(seq_set, TextIOWrapper) and seq_set.buffer.raw.isatty():
-                br._stderr("Warning: No input detected so AlignBuddy is aborting...\n"
-                           "For more information, try:\n%s --help\n" % sys.argv[0])
-                sys.exit()
-
-            seq_set = Sb.SeqBuddy(seq_set, in_args.in_format, in_args.out_format)
-            seqbuddy += seq_set.records
-        if seq_set:
-            seqbuddy = Sb.SeqBuddy(seqbuddy, seq_set.in_format, seq_set.out_format)
-        else:
-            seqbuddy = Sb.SeqBuddy(seqbuddy, in_args.in_format, in_args.out_format)
+        seqbuddy = create_seqbuddy()
 
         params = re.sub("\[(.*)\]", "\1", args[1]) if len(args) > 1 else None
 
@@ -1818,7 +2079,23 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
             _raise_error(e, "generate_alignment", "is not a recognized alignment tool")
         except SystemError as e:
             _raise_error(e, "generate_alignment", "Could not find")
+        except ValueError as err:
+            _raise_error(err, "generate_alignment", "PAGAN cannot run when less than 4 sequences are passed in")
         _exit("generate_alignment")
+
+    # Generate HMM
+    if in_args.generate_hmm:
+        alias = "hmmbuild" if not in_args.generate_hmm[0] else in_args.generate_hmm[0]
+        try:
+            alignbuddy = generate_hmm(alignbuddy, alias)
+        except SystemError as err:
+            _raise_error(err, "generate_hmm", ["Please check your spelling or install HMMER3",
+                                               "No output detected after running"])
+        for align in alignbuddy.alignments:
+            if not in_args.quiet:
+                br._stdout("%s\n" % align.hmm_out)
+            br._stdout("%s\n" % align.hmm)
+        _exit("generate_hmm")
 
     # Hash ids
     if in_args.hash_ids:
@@ -1840,7 +2117,7 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
                        "This is too small to properly cover all sequences, so it has been increased to %s.\n\n" %
                        (hash_length, holder), in_args.quiet)
             hash_length = holder
-        hash_ids(alignbuddy, hash_length)
+        hash_ids(alignbuddy, hash_length=hash_length, r_seed=in_args.random_seed)
 
         hash_table = "# Hash table\n"
         for _hash, orig_id in alignbuddy.hash_map.items():
@@ -1898,6 +2175,42 @@ def command_line_ui(in_args, alignbuddy, skip_exit=False, pass_through=False):  
         reverse = True if in_args.order_ids[0] else False
         _print_aligments(order_ids(alignbuddy, reverse=reverse))
         _exit("order_ids")
+
+    # Percent IDs
+    if in_args.percent_id:
+        alignbuddy = percent_id(alignbuddy)
+        output = ""
+        for indx, alignment in enumerate(alignbuddy.alignments):
+            output += "### Alignment %s ###\n\t" % (indx + 1)
+            for id1 in alignment.percent_ids:
+                output += "%s\t" % id1
+
+            output = output.strip() + "\n"
+            for id1 in alignment.percent_ids:
+                output += "%s\t" % id1
+                for id2 in alignment.percent_ids:
+                    output += "\t" if id1 == id2 else "%s\t" % round(alignment.percent_ids[id1][id2], 3)
+                output = output.strip() + "\n"
+            output = output.strip() + "\n\n"
+        output = output.strip() + "\n"
+        print(output)
+        _exit("percent_ids")
+
+    # Position Frequency Matrix
+    if in_args.pos_freq_mat:
+        position_frequency_matrix(alignbuddy)
+        output = ""
+        for indx, alignment in enumerate(alignbuddy.alignments):
+            output += "### Alignment %s ###\n" % (indx + 1)
+            matrix = [["{0:.3f}".format(pos[res]) for pos in alignment.pfm] for res in alignment.pfm[0]]
+            matrix = ["\t".join(res) for res in matrix]
+            counter = 0
+            for res in alignment.pfm[0]:
+                output += "%s\t%s\n" % (res, matrix[counter])
+                counter += 1
+            output += "\n"
+        br._stdout(output)
+        _exit("pos_freq_mat")
 
     # Pull records
     if in_args.pull_records:
@@ -2045,6 +2358,7 @@ def main():
         br.send_traceback("AlignBuddy", function, _e, VERSION)
         return False
     return True
+
 
 if __name__ == '__main__':
     main()

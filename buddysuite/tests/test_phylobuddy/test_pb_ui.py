@@ -28,8 +28,9 @@ import sys
 import argparse
 from copy import deepcopy
 from unittest import mock
-import ete3
 import shutil
+import webbrowser
+import pylab
 
 import buddy_resources as br
 import PhyloBuddy as Pb
@@ -40,6 +41,7 @@ WRITE_FILE = br.TempFile()
 
 def fmt(prog):
     return br.CustomHelpFormatter(prog)
+
 
 parser = argparse.ArgumentParser(prog="PhyloBuddy.py", formatter_class=fmt, add_help=False, usage=argparse.SUPPRESS,
                                  description='''\
@@ -125,6 +127,26 @@ def test_in_place_ui(capsys, pb_resources):
     assert "Warning: The -i flag was passed in, but the positional" in err
 
 
+# ###################### 'ab', '--add_branch' ###################### #
+def test_add_branch_ui(capsys, pb_odd_resources, hf):
+    test_in_args = deepcopy(in_args)
+
+    test_in_args.add_branch = [["Foo", "α8"]]
+    Pb.command_line_ui(test_in_args, Pb.PhyloBuddy(pb_odd_resources['lengths']), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "b83c4cfb07bd5df9f4bc41a7f9ebe718"
+
+    test_in_args.add_branch = [["((Foo:0.78,Bar:0.34):1.1,Baz:0.2);", "α2", "α5"]]
+    Pb.command_line_ui(test_in_args, Pb.PhyloBuddy(pb_odd_resources['lengths']), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "828a289b16f3a818230f54a0d4aa8c5d"
+
+    test_in_args.add_branch = [["Foo"]]
+    Pb.command_line_ui(test_in_args, Pb.PhyloBuddy(pb_odd_resources['lengths']), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert "Add branch tool requires at least two arguments: new_branch and sister_taxa." in err
+
+
 # ###################### 'cpt', '--collapse_polytomies' ###################### #
 def test_collapse_polytomies_ui(capsys, pb_odd_resources, hf):
     test_in_args = deepcopy(in_args)
@@ -160,28 +182,61 @@ def test_consensus_tree_ui(capsys, pb_resources, hf):
 
 
 # ###################### 'dt', '--display_trees' ###################### #
-def test_display_trees_ui(monkeypatch, pb_resources):
-    if 'DISPLAY' in os.environ:
+def test_display_trees_ui(monkeypatch, pb_resources, capsys):
+    with mock.patch.dict('os.environ'):
+        os.environ["DISPLAY"] = ":0"
         test_in_args = deepcopy(in_args)
-        test_in_args.display_trees = True
-        show = mock.Mock(return_value=True)
-        monkeypatch.setattr(ete3.TreeNode, "show", show)
+        test_in_args.display_trees = [None]
+        monkeypatch.setattr("builtins.input", lambda *_: "")
+        monkeypatch.setattr(webbrowser, "open_new_tab", lambda *_: "")
+        monkeypatch.setattr(pylab, "axis", lambda *_: True)
+        monkeypatch.setattr(pylab, "savefig", lambda *_, **__: True)
+        monkeypatch.setattr(Pb.Bio.Phylo, "draw", lambda *_, **__: True)
         Pb.command_line_ui(test_in_args, pb_resources.get_one("o k"), skip_exit=True)
+
+        test_in_args.display_trees = ["fake_program"]
+        Pb.command_line_ui(test_in_args, pb_resources.get_one("o k"), skip_exit=True)
+        out, err = capsys.readouterr()
+        assert "AttributeError: Unknown program 'fake_program' selected for display" in err
 
 
 def test_display_trees_ui_no_display(capsys, monkeypatch, pb_resources):
     test_in_args = deepcopy(in_args)
-    test_in_args.display_trees = True
-    show = mock.Mock(return_value=True)
-    monkeypatch.setattr(ete3.TreeNode, "show", show)
-    # noinspection PyUnresolvedReferences
+    test_in_args.display_trees = [None]
+    monkeypatch.setattr("builtins.input", lambda *_: "")
+    monkeypatch.setattr(webbrowser, "open_new_tab", lambda *_: "")
+    monkeypatch.setattr(os, "name", "posix")
+
+    # Non-graphical, not Mac
+    monkeypatch.setattr(sys, "platform", "blahh")
     with mock.patch.dict('os.environ'):
         if 'DISPLAY' in os.environ:
             del os.environ['DISPLAY']
         Pb.command_line_ui(test_in_args, pb_resources.get_one("o k"), skip_exit=True)
         out, err = capsys.readouterr()
-
     assert "Error: Your system does not appear to be graphical" in err
+
+    # Try XQuarts Mac
+    def mock_systemerror1(*_, **__):
+        raise SystemError("graphical fail")
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setattr(br, "dummy_func", mock_systemerror1)
+    with mock.patch.dict('os.environ'):
+        if 'DISPLAY' in os.environ:
+            del os.environ['DISPLAY']
+        Pb.command_line_ui(test_in_args, pb_resources.get_one("o k"), skip_exit=True)
+        out, err = capsys.readouterr()
+    assert "Try installing XQuartz (https://www.xquartz.org/)" in err, print(out, err)
+
+    # Unknown system error
+    def mock_systemerror2(*_, **__):
+        raise SystemError("Foo")
+    monkeypatch.setattr(br, "dummy_func", mock_systemerror2)
+    with mock.patch.dict('os.environ'):
+        os.environ["DISPLAY"] = ":0"
+        with pytest.raises(SystemError) as err:
+            Pb.command_line_ui(test_in_args, pb_resources.get_one("o k"), skip_exit=True)
+    assert "Foo" in str(err)
 
 
 # ###################### 'dis', '--distance' ###################### #
@@ -268,8 +323,8 @@ def test_hash_ids_ui(capsys, monkeypatch, pb_resources, hf):
     assert hf.string2hash(out) != hf.buddy2hash(pb_resources.get_one("m n"))
     assert "Warning: The hash_length parameter was passed in with the value -1" in err
 
-    def hash_ids(*args):
-        if args:
+    def hash_ids(*args, **kwargs):
+        if args or kwargs:
             pass
         raise ValueError("Foo bar")
 
@@ -277,6 +332,26 @@ def test_hash_ids_ui(capsys, monkeypatch, pb_resources, hf):
     monkeypatch.setattr(Pb, "hash_ids", hash_ids)
     with pytest.raises(ValueError):
         Pb.command_line_ui(test_in_args, pb_resources.get_one("o n"), pass_through=True)
+
+
+# ###################### 'ld', '--ladderize' ###################### #
+def test_ladderize_ui(capsys, pb_resources, hf):
+    test_in_args = deepcopy(in_args)
+    test_in_args.ladderize = [None]
+
+    Pb.command_line_ui(test_in_args, pb_resources.get_one("m k"), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "63ee71da75031d09f953932a1f0195b5"
+
+    test_in_args.ladderize = ['reverse']
+    Pb.command_line_ui(test_in_args, pb_resources.get_one("m k"), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "0dfa9fbb23428d2992b982776777428c"
+
+    test_in_args.ladderize = ['rev']
+    Pb.command_line_ui(test_in_args, pb_resources.get_one("m k"), skip_exit=True)
+    out, err = capsys.readouterr()
+    assert hf.string2hash(out) == "0dfa9fbb23428d2992b982776777428c"
 
 
 # ###################### 'li', '--list_ids' ###################### #
@@ -429,7 +504,7 @@ def test_show_unique_ui(capsys, pb_resources, hf, pb_odd_resources):
 
     Pb.command_line_ui(test_in_args, Pb.PhyloBuddy(pb_odd_resources["compare"]), skip_exit=True)
     out, err = capsys.readouterr()
-    assert hf.string2hash(out) == "ea5b0d1fcd7f39cb556c0f5df96281cf"
+    assert hf.string2hash(out) == "396e27e3c7c5aa126ec07f31307a288e"
 
     with pytest.raises(AssertionError) as err:
         Pb.command_line_ui(test_in_args, pb_resources.get_one("m k"), pass_through=True)
@@ -458,7 +533,7 @@ def test_unroot_ui(capsys, pb_odd_resources, hf):
 
     Pb.command_line_ui(test_in_args, Pb.PhyloBuddy(pb_odd_resources["figtree"]), skip_exit=True)
     out, err = capsys.readouterr()
-    assert hf.string2hash(out) == "10e9024301b3178cdaed0b57ba33f615"
+    assert hf.string2hash(out) == "e24e85fdc2f877f9340f147d9fed5fef", print(out)
 
 
 # ###################### main() ###################### #
@@ -503,14 +578,10 @@ def test_exit(monkeypatch, capsys, pb_resources):
     assert "('PhyloBuddy', '%s', 'list_ids', 2412)" % Pb.VERSION.short() in out
 
 
-def test_error(monkeypatch, capsys, pb_resources, pb_odd_resources):
+def test_error(capsys, pb_resources):
     test_in_args = deepcopy(in_args)
     test_in_args.show_unique = [True]
 
     Pb.command_line_ui(test_in_args, pb_resources.get_one("o k"), skip_exit=True)
     out, err = capsys.readouterr()
     assert "PhyloBuddy object should have exactly 2 trees." in err
-
-    monkeypatch.setattr(Pb, "_convert_to_ete", mock_assertionerror)
-    with pytest.raises(AssertionError):
-        Pb.command_line_ui(test_in_args, Pb.PhyloBuddy(pb_odd_resources["compare"]), skip_exit=True)

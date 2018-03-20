@@ -80,7 +80,7 @@ FORMATS = ["ids", "accessions", "summary", "full-summary", "clustal", "embl", "f
            "fastq-solexa", "fastq-illumina", "genbank", "gb", "imgt", "nexus", "phd", "phylip", "seqxml",
            "stockholm", "tab", "qual"]
 CONFIG = br.config_values()
-VERSION = br.Version("DatabaseBuddy", 1, "2.7", br.contributors, {"year": 2017, "month": 6, "day": 16})
+VERSION = br.Version("DatabaseBuddy", 1, "4b", br.contributor_list, {"year": 2017, "month": 12, "day": 20})
 
 GREY = "\033[90m"
 RED = "\033[91m"
@@ -247,8 +247,8 @@ class DbBuddy(object):  # Open a file or read a handle and parse, or convert raw
 
     def print(self, _num=0, quiet=False, columns=None, destination=None, group="records"):
         """
-        ToDo: Allow slices of records to be returned (e.g., [5:-9])
         :param _num: Limit the number of rows (records) returned, otherwise everything is output
+        :type _num: int or list
         :param quiet: suppress stderr
         :param columns: Variable, list of column names to include in summary output
         :param destination: a file path or handle to write to
@@ -256,7 +256,21 @@ class DbBuddy(object):  # Open a file or read a handle and parse, or convert raw
         :return: Nothing.
         """
         group = self.trash_bin if group == "trash_bin" else self.records
-        _num = len(group) if abs(_num) >= len(group) or not _num else _num
+        if type(_num) == int:
+            if _num == 0:
+                records = list(group.items())
+            else:
+                # After the 'else' deals with negative values (i.e., pull from back of list)
+                records = list(group.items())[:_num] if _num > 0 else list(group.items())[len(group) + _num:]
+        else:
+            if len(_num) == 0 or (len(_num) == 1 and _num[0] == 0):
+                records = list(group.items())
+            elif len(_num) == 1:
+                records = list(group.items())[:_num[0]] if _num[0] > 0 else list(group.items())[len(group) + _num[0]:]
+            elif len(_num) == 2:
+                records = list(group.items())[_num[0]:_num[1]]
+            else:
+                records = list(group.items())[_num[0]:_num[1]:_num[2]]
 
         # First deal with anything that broke or wasn't downloaded
         errors_etc = ""
@@ -265,7 +279,7 @@ class DbBuddy(object):  # Open a file or read a handle and parse, or convert raw
             for _hash, failure in self.failures.items():
                 errors_etc += str(failure)
 
-        if len(self.record_breakdown()["accession"]) > 0 and _num == len(group):
+        if len(self.record_breakdown()["accession"]) > 0 and len(records) == len(group):
             errors_etc += "# ################## Accessions without Records ################## #\n"
             _counter = 1
             for _next_acc in self.record_breakdown()["accession"]:
@@ -281,8 +295,6 @@ class DbBuddy(object):  # Open a file or read a handle and parse, or convert raw
             br._stderr(errors_etc, quiet)
 
         _output = ""
-        # If negative number requests, return from back of list
-        records = list(group.items())[:_num] if _num > 0 else list(group.items())[len(group) + _num:]
 
         # Summary outputs
         if self.out_format in ["summary", "full-summary", "ids", "accessions"]:
@@ -384,7 +396,7 @@ class DbBuddy(object):  # Open a file or read a handle and parse, or convert raw
             if self.out_format in ["gb", "genbank"]:
                 for _accession, _rec in group.items():
                     if len(_accession) > 16:
-                        br._stderr("Warning: Genbank format returned an 'ID too long' error. Format changed to EMBL.\n\n")
+                        br._stderr("Warning: Genbank format returned 'ID too long' error. Format changed to EMBL.\n\n")
                         self.out_format = "embl"
                         break
 
@@ -943,9 +955,10 @@ class NCBIClient(GenericClient):
                     handle = Entrez.esummary(db=db, id=query, retmax=10000)
                 elif tool == "efetch_seq":
                     # Example query of ACCNs: "XP_010103297.1,XP_010103298.1,XP_010103299.1"
-                    handle = Entrez.efetch(db=db, id=query, rettype="gb", retmode="text", retmax=10000)
+                    handle = Entrez.efetch(db=db, id=query, rettype="gbwithparts", retmode="text", retmax=10000)
                 elif tool == "esearch":
-                    count = Entrez.read(Entrez.esearch(db=db, term=re.sub('[\'"]', '', query), rettype="count"))["Count"]
+                    count = Entrez.read(Entrez.esearch(db=db, term=re.sub('[\'"]', '', query),
+                                                       rettype="count"))["Count"]
                     handle = Entrez.esearch(db=db, term=re.sub('[\'"]', '', query), retmax=count, idtype='acc')
                 else:
                     raise ValueError("_mc_query() 'tool' argument must be in 'esummary_taxa', "
@@ -1097,7 +1110,7 @@ class NCBIClient(GenericClient):
         self.parse_error_file()
 
         results = self.results_file.read().split("\n### END ###\n")
-        results = [x for x in results if x]
+        results = [x for x in results if x and "<ERROR>Empty id list" not in x]
 
         taxa = {}
         for result in results:
@@ -1566,11 +1579,11 @@ Further details about each command can be accessed by typing 'help <command>'
         line = line.split(" ")
         new_database_list = []
         not_a_database = []
-        for l in line:
-            if l not in DATABASES and l != "all":
-                not_a_database.append(l)
+        for line_item in line:
+            if line_item not in DATABASES and line_item != "all":
+                not_a_database.append(line_item)
             else:
-                new_database_list.append(l)
+                new_database_list.append(line_item)
         if not_a_database:
             _stdout("Invalid database choice(s): %s.\n"
                     "Please select from %s\n" % (", ".join(not_a_database), ["all"] + DATABASES), format_in=RED,
@@ -1857,10 +1870,10 @@ Further details about each command can be accessed by typing 'help <command>'
             num_records = len(breakdown["full"])
 
         columns = []
-        force_num_records = 0
+        force_num_records = []
         for _next in line:
             try:
-                force_num_records = int(_next)
+                force_num_records.append(int(_next))
             except ValueError:
                 columns.append(_next)
 
@@ -1977,12 +1990,11 @@ Further details about each command can be accessed by typing 'help <command>'
 
         breakdown = self.dbbuddy.record_breakdown()
         if self.dbbuddy.out_format in ["ids", "accessions", "summary", "full-summary"]:
-            if breakdown["full"]:
-                confirm = br.ask("%sYou are about to write to a summary format "
-                                 "which does not include sequence. Continue [y]/n?%s" % (RED, self.terminal_default))
-                if not confirm:
-                    _stdout("Abort...\n", format_in=RED, format_out=self.terminal_default)
-                    return
+            confirm = br.ask("%sYou are about to write to a summary format "
+                             "which does not include sequence. Continue [y]/n?%s" % (RED, self.terminal_default))
+            if not confirm:
+                _stdout("Abort...\n", format_in=RED, format_out=self.terminal_default)
+                return
             count = len(breakdown["full"] + breakdown["summary"])
             msg = "accession" if self.dbbuddy.out_format in ["ids", "accessions"] else "summary record"
             msg += "s" if count > 1 else ""
@@ -2241,7 +2253,8 @@ are supplied then full sequence records will be downloaded.\n
 Output the records held in the Live Session (output format currently set to '{0}{1}{2}')
 Optionally include an integer value and/or column name(s) to limit
 the number of records and amount of information per record displayed.
-Use a negative integer to return records from the bottom of the list.\n
+Use a negative integer to return records from the bottom of the list,
+or multiple integers to return a slice (e.g., show 5 10 organism).\n
 '''.format(YELLOW, self.dbbuddy.out_format, GREEN), format_in=GREEN, format_out=self.terminal_default)
 
     def help_sort(self):
@@ -2299,6 +2312,7 @@ def argparse_init():
 ''')
 
     br.db_modifiers["database"]["choices"] = DATABASES
+    br.db_modifiers["out_format"]["choices"] = FORMATS
     br.flags(parser, ("user_input", "Specify accession numbers or search terms, "
                                     "either in a file or as a comma separated list"),
              br.db_flags, br.db_modifiers, VERSION)
@@ -2358,39 +2372,43 @@ def command_line_ui(in_args, dbbuddy, skip_exit=False):
     if in_args.live_shell:
         launch_live_shell()
 
-    """
-    def _print_recs(_dbbuddy):
-        _dbbuddy.print()
-
-    # Download everything
-    if in_args.download_everything:
-        dbbuddy.out_format = "gb" if not in_args.out_format else in_args.out_format
-        download_everything(dbbuddy)
-
-        if len(dbbuddy.failures) > 0:
-            output = "# ###################### Accession failures ###################### #\n"
-            counter = 1
-            for next_acc in dbbuddy.failures:
-                output += "%s\t" % next_acc
-                if counter % 4 == 0:
-                    output = "%s\n" % output.strip()
-                counter += 1
-            br._stderr("%s\n# ################################################################ #\n\n" % output.strip())
-
-        dbbuddy.print()
-        sys.exit()
-
     # Retrieve Accessions
     if in_args.retrieve_accessions:
-        if not in_args.out_format:
+        if not in_args.out_format or in_args.out_format not in ["ids", "accessions", "full-summary", "summary"]:
             dbbuddy.out_format = "ids"
-        retrieve_accessions(dbbuddy)
+        retrieve_summary(dbbuddy)
         dbbuddy.print()
-        sys.exit()
+        _exit("retrieve_accessions")
 
+    # Retrieve sequences
     if in_args.retrieve_sequences:
-        sys.exit()
-    """
+        if not in_args.out_format:
+            dbbuddy.out_format = "fasta"
+        retrieve_summary(dbbuddy)
+
+        amount_seq_requested = 0
+        for _accn, _rec in dbbuddy.records.items():
+            amount_seq_requested += _rec.size
+
+        if amount_seq_requested > 50000:
+            confirm = br.ask("{0}You are requesting {2}{1}{0} residues of sequence data. "
+                             "Continue (y/[n])?\033[m\033[40m".format(GREEN, br.pretty_number(amount_seq_requested),
+                                                                      YELLOW), default="no")
+            if not confirm:
+                _stdout("Aborted...\n\n", format_in=RED, format_out="\033[m\033[40m")
+                _exit("retrieve_sequences")
+
+        retrieve_sequences(dbbuddy)
+
+        if len(dbbuddy.failures) > 0:
+            output = "# ###################### Failures ###################### #\n"
+            for accn, failure in dbbuddy.failures.items():
+                output += "%s\n%s\n\n" % (accn, failure)
+            br._stderr("%s\n# ############################################## #\n\n" % output.strip())
+
+        dbbuddy.print(quiet=True)
+        _exit("retrieve_sequences")
+
     # Guess database
     if in_args.guess_database:
         output = ""
@@ -2425,7 +2443,7 @@ def command_line_ui(in_args, dbbuddy, skip_exit=False):
             output += "Nothing to return\n"
 
         _stdout(output)
-        sys.exit()
+        _exit("guess_database")
 
     # Default to LiveShell
     launch_live_shell()
@@ -2443,14 +2461,15 @@ def main():
     except SystemExit:
         return False
     except Exception as e:
-        function = ""
+        func = ""
         for next_arg in vars(initiation[0]):
             if getattr(initiation[0], next_arg) and next_arg in br.db_flags:
-                function = next_arg
+                func = next_arg
                 break
-        br.send_traceback("DbBuddy", function, e, VERSION)
+        br.send_traceback("DbBuddy", func, e, VERSION)
         return False
     return True
+
 
 if __name__ == '__main__':
     main()
